@@ -190,6 +190,24 @@ async fn token_worker_loop(
                 }
             }
 
+            StrategyAction::BurnFromEscrow { amount } => {
+                println!("[token_worker] burn_from_escrow({})", amount);
+                match client.submit_burn_from_escrow(amount).await {
+                    Ok(r) if r.success => {
+                        println!("[token_worker] burn_from_escrow OK (gas={})", r.gas_used);
+                        notify(&event_tx, "burn_from_escrow", true, format!("gas={}", r.gas_used)).await;
+                    }
+                    Ok(r) => {
+                        eprintln!("[token_worker] burn_from_escrow FAILED: {}", r.vm_status);
+                        notify(&event_tx, "burn_from_escrow", false, r.vm_status).await;
+                    }
+                    Err(e) => {
+                        eprintln!("[token_worker] burn_from_escrow ERROR: {}", e);
+                        notify(&event_tx, "burn_from_escrow", false, e.to_string()).await;
+                    }
+                }
+            }
+
             StrategyAction::Lock { symbol, amount, duration_secs } => {
                 println!("[token_worker] lock_tokens({}, {}, {}s)", symbol, amount, duration_secs);
                 let sym_id = match symbol.as_str() {

@@ -523,6 +523,7 @@ pub enum StrategyAction {
     Mint { m_amount: u64, k_amount: u64, t_amount: u64 },
     ClaimMint,
     Burn { amount: u64 },
+    BurnFromEscrow { amount: u64 },
     Lock { symbol: String, amount: u64, duration_secs: u64 },
     Unlock { lock_index: u64 },
 }
@@ -535,6 +536,7 @@ impl StrategyAction {
             StrategyAction::Mint { .. } |
             StrategyAction::ClaimMint |
             StrategyAction::Burn { .. } |
+            StrategyAction::BurnFromEscrow { .. } |
             StrategyAction::Lock { .. } |
             StrategyAction::Unlock { .. }
         )
@@ -595,6 +597,11 @@ impl StrategyAction {
                 let amount = json.get("amount").and_then(|v| v.as_u64())
                     .ok_or_else(|| StrategyError::ParseError("missing 'amount' field".into()))?;
                 Ok(StrategyAction::Burn { amount })
+            }
+            "burn_from_escrow" => {
+                let amount = json.get("amount").and_then(|v| v.as_u64())
+                    .ok_or_else(|| StrategyError::ParseError("missing 'amount' field".into()))?;
+                Ok(StrategyAction::BurnFromEscrow { amount })
             }
             "lock" => {
                 let symbol = json.get("symbol").and_then(|v| v.as_str())

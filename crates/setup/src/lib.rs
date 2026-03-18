@@ -189,6 +189,15 @@ pub trait ChainClient: Send + Sync {
         Box::pin(async { Err(SetupError::ChainError("submit_burn_mkt not implemented".into())) })
     }
 
+    /// Call tokens::burn_from_escrow(amount). Withdraws triples from escrow,
+    /// burns them, returns SUPRA. C2 contract function.
+    fn submit_burn_from_escrow(
+        &self,
+        _amount: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async { Err(SetupError::ChainError("submit_burn_from_escrow not implemented".into())) })
+    }
+
     /// Call tokens::lock_tokens(symbol, amount, min_duration_secs).
     fn submit_lock_tokens(
         &self,

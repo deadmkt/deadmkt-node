@@ -735,6 +735,19 @@ impl ChainClient for SupraSetupClient {
         })
     }
 
+    fn submit_burn_from_escrow(
+        &self,
+        amount: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            let args = vec![
+                bcs::to_bytes(&amount)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+            ];
+            self.submit_entry_function("tokens", "burn_from_escrow", args).await
+        })
+    }
+
     fn submit_lock_tokens(
         &self,
         symbol: u8,
