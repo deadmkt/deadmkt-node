@@ -546,7 +546,7 @@ impl ChainClient for SupraSetupClient {
     ) -> Pin<Box<dyn Future<Output = Result<NftConfigInfo, SetupError>> + Send + '_>> {
         Box::pin(async move {
             match self.client
-                .view_raw("nft", "get_config", vec![], vec![])
+                .view_raw("nft", "get_nft_config", vec![], vec![])
                 .await
             {
                 Ok(val) => Ok(NftConfigInfo {
