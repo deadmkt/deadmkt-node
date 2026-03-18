@@ -11,16 +11,13 @@
 //
 // All chain interactions use wiremock for deterministic testing.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use deadmkt_chain::client::SupraClient;
 use deadmkt_chain::types::BatchTradeSettledEvent;
-use deadmkt_config::ProfitConfig;
 use deadmkt_crypto::Order;
 use deadmkt_escrow_tracker::EscrowTracker;
 use deadmkt_matching::{Match, RevealedOrder};
-use deadmkt_profit::{ProfitAction, ProfitManager};
 use deadmkt_settlement::{
     AbortCode, SettlementAction, SettlementManager, SettlementOutcome, SettlementSubmitter,
 };
@@ -408,74 +405,4 @@ fn t_int_b4_04_crash_recovery() {
     assert_eq!(rec3.status, "expired");
 }
 
-// =========================================================================
-// T_INT_B4_05: Settlement → profit check → auto transfer
-// =========================================================================
-
-#[test]
-fn t_int_b4_05_settlement_triggers_profit_transfer() {
-    let tracker = Arc::new(Mutex::new(EscrowTracker::new()));
-
-    // Setup: base_capital=5000 KAY, threshold=10%
-    let mut base_capital = HashMap::new();
-    base_capital.insert("KAY".to_string(), 5_000u64);
-    let config = ProfitConfig {
-        base_capital,
-        threshold_pct: 10,
-        transfer_mode: "all".to_string(),
-        transfer_mode_value: None,
-    };
-
-    let own_nft = 42;
-    let mut settle_mgr = SettlementManager::new(tracker.clone(), own_nft);
-    let profit_mgr = ProfitManager::new(config, tracker.clone());
-
-    // Initial balance: 5400 KAY (below threshold 5500)
-    {
-        let mut t = tracker.lock().unwrap();
-        t.set_confirmed("KAY", 5_400);
-        t.set_confirmed("EMM", 100_000);
-    }
-
-    // Pre-check: no profit action
-    assert_eq!(
-        profit_mgr.check_and_transfer("KAY", 5_400),
-        ProfitAction::NoAction,
-    );
-
-    // Create a sell match (we sell EMM, receive KAY)
-    // This will push KAY confirmed above threshold after confirmation
-    let m = make_test_match(100, 88, 42, 10_000); // we are seller (nft 42)
-    settle_mgr.register_match(m.clone(), false, 1000, 50, "EMM", "KAY", 5, 5).unwrap();
-
-    // Seller outflow = 10000 EMM
-    // Seller inflow = 10000 * 4_900_000 / 1e8 = 490 KAY (pending, not counted)
-    {
-        let t = tracker.lock().unwrap();
-        assert_eq!(t.projected("EMM"), 100_000 - 10_000);
-    }
-
-    // Confirm settlement — inflow lands
-    let event = make_event_for(&m);
-    settle_mgr.on_settlement_confirmed(&event);
-
-    // After confirmation: KAY confirmed += 490 = 5890
-    // Simulate the chain balance update (in real node, poller updates this)
-    let new_confirmed_kay = 5_400 + 490; // 5890
-    {
-        let mut t = tracker.lock().unwrap();
-        t.set_confirmed("KAY", new_confirmed_kay);
-    }
-
-    // Now profit check: 5890 > 5500 (threshold) → Transfer
-    // Profit = 5890 - 5000 = 890. Mode "all" → 890.
-    // safe_max = projected(5890) - base(5000) = 890
-    let action = profit_mgr.check_and_transfer("KAY", new_confirmed_kay);
-    match action {
-        ProfitAction::Transfer { token, amount } => {
-            assert_eq!(token, "KAY");
-            assert_eq!(amount, 890);
-        }
-        other => panic!("Expected Transfer, got {:?}", other),
-    }
-}
+// T_INT_B4_05 removed: tested dead ProfitManager crate (L1)

@@ -85,27 +85,7 @@ rand = { workspace = true }
 integration = []
 
 [dev-dependencies]
-tokio = { workspace = true }
-libp2p = { workspace = true }
-ed25519-dalek = { workspace = true }
-rand = { workspace = true }
-hex = { workspace = true }
-serde_json = { workspace = true }
 wiremock = { workspace = true }
 tempfile = { workspace = true }
-deadmkt-crypto = { path = "crates/crypto" }
-deadmkt-chain = { path = "crates/chain" }
-deadmkt-matching = { path = "crates/matching" }
-deadmkt-escrow-tracker = { path = "crates/escrow_tracker" }
-deadmkt-settlement = { path = "crates/settlement" }
-deadmkt-strategy = { path = "crates/strategy" }
-deadmkt-node-state = { path = "crates/node_state" }
-deadmkt-gas-manager = { path = "crates/gas_manager" }
-deadmkt-orchestrator = { path = "crates/orchestrator" }
-deadmkt-config = { path = "crates/config" }
-deadmkt-storage = { path = "crates/storage" }
-deadmkt-gossip = { path = "crates/gossip" }
-deadmkt-gossip-validation = { path = "crates/gossip_validation" }
-deadmkt-batch-state = { path = "crates/batch_state" }
 futures-util = "0.3"
 tokio-tungstenite = "0.21"
