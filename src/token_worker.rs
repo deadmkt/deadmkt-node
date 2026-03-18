@@ -114,6 +114,17 @@ async fn token_worker_loop(
 ) {
     println!("[token_worker] started — listening for token actions");
 
+    // ── N11: Startup wallet sweep ──
+    // On startup, sweep any tokens sitting in the trustee wallet into escrow.
+    // Handles legacy state from DMKT8 or earlier versions where claim_mint
+    // left tokens in the wallet. Once C1 (atomic claim_mint→deposit) is
+    // deployed, this only triggers for migrating old state.
+    {
+        let _guard = tx_lock.lock().await;
+        println!("[token_worker] startup: sweeping wallet → escrow");
+        auto_deposit_wallet_to_escrow(&client, &event_tx).await;
+    }
+
     while let Some(action) = rx.recv().await {
         // Acquire tx lock to prevent sequence number collisions
         // with the settlement worker (both submit from the same address).
