@@ -953,6 +953,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     // SP5: Track last batch stats for strategy visibility
     let mut last_batch_data: Option<deadmkt_strategy::LastBatchData> = None;
     let mut cur_batch_matches: u64 = 0;
+    let mut cur_batch_volume: u64 = 0;
 
     // SP8: Node health counters
     let mut uptime_batches: u64 = 0;
@@ -1046,10 +1047,11 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             last_batch_data = Some(deadmkt_strategy::LastBatchData {
                                 batch_id: last_batch_id,
                                 matches: cur_batch_matches,
-                                volume: "0".to_string(), // TODO: track volume
+                                volume: cur_batch_volume.to_string(),
                             });
                         }
                         cur_batch_matches = 0;
+                        cur_batch_volume = 0;
                         uptime_batches += 1;
                         settle_failed_recent = settle_failed_recent.saturating_sub(1); // natural decay
 
@@ -1409,6 +1411,9 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                 println!("[match] {} matches found", n);
                             }
                             cur_batch_matches = n as u64;
+                            cur_batch_volume = orchestrator.current_matches.iter()
+                                .map(|m| m.fill_quantity)
+                                .sum();
 
                             // SP6b: Send match_result to strategy
                             if strategy_server.is_connected() {
