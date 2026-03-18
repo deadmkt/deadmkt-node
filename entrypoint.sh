@@ -35,7 +35,7 @@ fi
 # Read auth token from config.json if not overridden
 AUTH_TOKEN="${DEADMKT_AUTH_TOKEN:-}"
 if [ -z "$AUTH_TOKEN" ] && [ -f "$DATA_DIR/config.json" ]; then
-    AUTH_TOKEN=$(grep -o '"auth_token"[[:space:]]*:[[:space:]]*"[^"]*"' "$DATA_DIR/config.json" | sed 's/.*: *"//;s/"//' 2>/dev/null || true)
+    AUTH_TOKEN=$(grep -o '"strategy_auth_token"[[:space:]]*:[[:space:]]*"[^"]*"' "$DATA_DIR/config.json" | sed 's/.*: *"//;s/"//' 2>/dev/null || true)
 fi
 if [ -z "$AUTH_TOKEN" ]; then
     AUTH_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -d '=+/' | head -c 32)
