@@ -181,14 +181,6 @@ pub trait ChainClient: Send + Sync {
         Box::pin(async { Ok(0) })
     }
 
-    /// Call tokens::burn_mkt(amount). Burns equal triples, returns SUPRA.
-    fn submit_burn_mkt(
-        &self,
-        _amount: u64,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
-        Box::pin(async { Err(SetupError::ChainError("submit_burn_mkt not implemented".into())) })
-    }
-
     /// Call tokens::burn_from_escrow(amount). Withdraws triples from escrow,
     /// burns them, returns SUPRA. C2 contract function.
     fn submit_burn_from_escrow(
@@ -1089,11 +1081,6 @@ mod tests {
             Box::pin(async move { Ok(addr) })
         }
 
-        fn submit_burn_mkt(&self, _amount: u64)
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>
-        {
-            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 400, vm_status: "ok".into() }) })
-        }
 
         fn submit_lock_tokens(&self, _symbol: u8, _amount: u64, _duration: u64)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>

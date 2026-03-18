@@ -601,9 +601,6 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     };
     let mut consecutive_hb_failures: u64 = 0;
     let mut last_settlement_batch: u64 = 0;
-    let mut last_sweep_batch: u64 = 0;
-    let sweep_interval: u64 = 50; // check every 50 batches
-    let mut gas_low: bool = false; // set on INSUFFICIENT_BALANCE, cleared on heartbeat success
     println!("  Heartbeat: every {} batches, timeout {} batches (offset by nft_id={})",
         heartbeat_interval, heartbeat_timeout, config.nft_id);
     println!("  Gas:       max_gas={}, gas_price={}", config.max_gas_amount, config.gas_unit_price);
@@ -1171,14 +1168,12 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                             consecutive_hb_failures);
                                     }
                                     consecutive_hb_failures = 0;
-                                    gas_low = false;
                                     println!("[heartbeat] sent at batch {}", new_batch_id);
                                 }
                                 Err(e) => {
                                     consecutive_hb_failures += 1;
                                     let err_str = e.to_string();
                                     if err_str.contains("INSUFFICIENT_BALANCE") {
-                                        gas_low = true;
                                         eprintln!("[heartbeat] FAILED: out of gas (sweep disabled)");
                                     }
                                     let est_missed = consecutive_hb_failures * heartbeat_interval;
@@ -1215,23 +1210,8 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             }
                         }
 
-                        // Profit sweep: periodically check and sweep excess to beneficiary
-                        if config.profit_taking.threshold_pct > 0
-                            && !gas_low
-                            && new_batch_id.saturating_sub(last_sweep_batch) >= sweep_interval
-                        {
-                            last_sweep_batch = new_batch_id;
-                            match check_and_sweep_profits(
-                                &escrow_client,
-                                &signing_key,
-                                &config,
-                                &escrow_balances,
-                                &token_decimals,
-                            ).await {
-                                Ok(()) => {},
-                                Err(e) => eprintln!("[sweep] error: {}", e),
-                            }
-                        }
+                        // L2: Inline profit sweep removed in DMKT9.
+                        // Strategy sends burn_from_escrow through the token_worker instead.
 
                         // Clear reveals from previous batch.
                         // Commits/committed_orders preserved until next COMMIT phase.
@@ -1517,9 +1497,6 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             // Detect gas exhaustion from settlement failures
                             let mut error_reason = String::new();
                             if let SettleResult::RpcError { ref error, .. } = other {
-                                if error.contains("INSUFFICIENT_BALANCE") {
-                                    gas_low = true;
-                                }
                                 error_reason = error.clone();
                             }
                             if let SettleResult::Failed { ref code, .. } = other {
@@ -1840,141 +1817,8 @@ async fn submit_heartbeat(
     Ok(tx_hash)
 }
 
-/// Check escrow balances and sweep profits to beneficiary as SUPRA.
-///
-/// Logic:
-///   1. Parse escrow balances, compare against base_capital + threshold
-///   2. If ALL tokens above threshold → calculate min excess above base_capital
-///   3. withdraw_triples_to_wallet(nft_id, min_excess)  → tokens to trustee wallet
-///   4. burn_mkt(min_excess)                             → burn triples, receive SUPRA
-///   5. transfer SUPRA to beneficiary
-async fn check_and_sweep_profits(
-    client: &SupraClient,
-    signing_key: &SigningKey,
-    config: &NodeConfig,
-    escrow_balances: &HashMap<String, String>,
-    token_decimals: &HashMap<String, u8>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Skip if profit-taking is disabled
-    if config.profit_taking.threshold_pct == 0 {
-        return Ok(());
-    }
-
-    let threshold_mul = 1.0 + (config.profit_taking.threshold_pct as f64 / 100.0);
-
-    // Parse escrow balances back to raw u64
-    let tokens = ["EMM", "KAY", "TEE"];
-    let mut raw_balances: Vec<u64> = Vec::new();
-    let mut base_capitals: Vec<u64> = Vec::new();
-
-    for token in &tokens {
-        let dec = token_decimals.get(*token).copied().unwrap_or(5) as u32;
-        let divisor = 10u64.pow(dec) as f64;
-
-        // Current escrow balance
-        let human = escrow_balances.get(*token)
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.0);
-        let raw = (human * divisor) as u64;
-        raw_balances.push(raw);
-
-        // Base capital (set during setup)
-        let base = config.profit_taking.base_capital
-            .get(*token)
-            .copied()
-            .unwrap_or(0);
-        base_capitals.push(base);
-    }
-
-    // Check: all 3 above threshold?
-    for i in 0..3 {
-        let target = (base_capitals[i] as f64 * threshold_mul) as u64;
-        if raw_balances[i] < target {
-            return Ok(()); // Not all above threshold — do nothing
-        }
-    }
-
-    // Calculate min excess above BASE (not threshold)
-    let min_excess = (0..3)
-        .map(|i| raw_balances[i] - base_capitals[i])
-        .min()
-        .unwrap_or(0);
-
-    if min_excess == 0 {
-        return Ok(());
-    }
-
-    println!("[sweep] All tokens above {}% threshold. Sweeping {} per token...",
-        config.profit_taking.threshold_pct, min_excess);
-
-    let contract_addr = deadmkt_settlement::parse_address(&config.contracts.escrow)
-        .map_err(|e| format!("bad contract address: {:?}", e))?;
-    let sender = deadmkt_settlement::parse_address(&config.trustee_address)
-        .map_err(|e| format!("bad sender address: {:?}", e))?;
-    let framework_addr = deadmkt_settlement::parse_address("0x0000000000000000000000000000000000000000000000000000000000000001")
-        .map_err(|e| format!("bad framework address: {:?}", e))?;
-
-    let sender_hex = format!("0x{}", hex::encode(sender));
-
-    // --- TX 1: withdraw_triples_to_wallet(nft_id, amount) ---
-    let account = client.get_account(&sender_hex).await?;
-    let expiry = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() + 60;
-
-    let args_withdraw = vec![
-        bcs::to_bytes(&config.nft_id).map_err(|e| format!("bcs: {}", e))?,
-        bcs::to_bytes(&min_excess).map_err(|e| format!("bcs: {}", e))?,
-    ];
-    let tx1 = deadmkt_settlement::build_and_sign_entry_function(
-        signing_key, sender, contract_addr,
-        "escrow", "withdraw_triples_to_wallet",
-        args_withdraw, account.sequence_number, expiry,
-        config.chain_id, config.max_gas_amount, config.gas_unit_price,
-    ).map_err(|e| format!("withdraw tx build failed: {:?}", e))?;
-
-    client.submit_raw(&tx1).await?;
-    println!("[sweep] withdraw_triples_to_wallet submitted");
-
-    // --- TX 2: burn_mkt(amount) ---
-    let account2 = client.get_account(&sender_hex).await?;
-    let args_burn = vec![
-        bcs::to_bytes(&min_excess).map_err(|e| format!("bcs: {}", e))?,
-    ];
-    let tx2 = deadmkt_settlement::build_and_sign_entry_function(
-        signing_key, sender, contract_addr,
-        "tokens", "burn_mkt",
-        args_burn, account2.sequence_number, expiry,
-        config.chain_id, config.max_gas_amount, config.gas_unit_price,
-    ).map_err(|e| format!("burn tx build failed: {:?}", e))?;
-
-    client.submit_raw(&tx2).await?;
-    println!("[sweep] burn_mkt submitted");
-
-    // --- TX 3: transfer SUPRA to beneficiary ---
-    // SUPRA returned = min_excess * 3 * SUPRA_PER_TOKEN_UNIT (100)
-    let supra_amount = min_excess * 300; // 3 tokens × 100 quants per base unit
-    let beneficiary = deadmkt_settlement::parse_address(&config.beneficiary_address)
-        .map_err(|e| format!("bad beneficiary address: {:?}", e))?;
-
-    let account3 = client.get_account(&sender_hex).await?;
-    let args_transfer = vec![
-        bcs::to_bytes(&beneficiary).map_err(|e| format!("bcs: {}", e))?,
-        bcs::to_bytes(&supra_amount).map_err(|e| format!("bcs: {}", e))?,
-    ];
-    let tx3 = deadmkt_settlement::build_and_sign_entry_function(
-        signing_key, sender, framework_addr,
-        "supra_account", "transfer",
-        args_transfer, account3.sequence_number, expiry,
-        config.chain_id, config.max_gas_amount, config.gas_unit_price,
-    ).map_err(|e| format!("transfer tx build failed: {:?}", e))?;
-
-    client.submit_raw(&tx3).await?;
-
-    let supra_human = supra_amount as f64 / 100_000_000.0;
-    println!("[sweep] Swept {:.8} SUPRA to beneficiary {}", supra_human, &config.beneficiary_address[..12]);
-
-    Ok(())
-}
+// check_and_sweep_profits: Removed in DMKT9 (L2).
+// Strategy sends burn_from_escrow through the token_worker instead.
 
 /// Fetch SUPRA (gas) coin balance for an address.
 async fn fetch_supra_balance(

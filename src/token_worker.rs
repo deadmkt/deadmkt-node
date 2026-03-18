@@ -173,8 +173,9 @@ async fn token_worker_loop(
             }
 
             StrategyAction::Burn { amount } => {
-                println!("[token_worker] burn_mkt({})", amount);
-                match client.submit_burn_mkt(amount).await {
+                // DMKT9: Burn action remapped to burn_from_escrow (no wallet intermediary)
+                println!("[token_worker] burn_from_escrow({}) (via burn action)", amount);
+                match client.submit_burn_from_escrow(amount).await {
                     Ok(r) if r.success => {
                         println!("[token_worker] burn OK (gas={})", r.gas_used);
                         notify(&event_tx, "burn", true, format!("gas={}", r.gas_used)).await;
