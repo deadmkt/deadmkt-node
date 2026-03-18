@@ -40,7 +40,7 @@ cargo test
 
 ## Contract
 
-Address: `0x4a239389433f51450765244d9891c6628b619e41a8aac82cdda4653353fb4a36`
+Address: `0xb749198e9b4dcd850c10e4501fa5fe72f50921771f6a75f0e1ac23335a83fc0c`
 Chain: Supra Testnet (chain_id: 6)
 5 modules: nft, escrow, settlement, pool_config, tokens
 
