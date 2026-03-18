@@ -1,0 +1,16 @@
+[package]
+name = "deadmkt-escrow-tracker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deadmkt-chain = { path = "../chain" }
+deadmkt-matching = { path = "../matching" }
+deadmkt-crypto = { path = "../crypto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

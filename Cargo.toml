@@ -1,0 +1,117 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/config",
+    "crates/keystore",
+    "crates/crypto",
+    "crates/chain",
+    "crates/escrow_tracker",
+    "crates/setup",
+    "crates/storage",
+    "crates/matching",
+    "crates/gossip",
+    "crates/gossip_validation",
+    "crates/batch_state",
+    "crates/integration_tests",
+    "crates/settlement",
+    "crates/withdrawal",
+    "crates/profit",
+    "crates/strategy",
+    "crates/node_state",
+    "crates/gas_manager",
+    "crates/orchestrator",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+sha3 = "0.10"
+bcs = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+hex = "0.4"
+thiserror = "2"
+tempfile = ">=3,<3.20"
+wiremock = "0.5"
+bincode = "1.3"
+clap = { version = "4", features = ["derive"] }
+libp2p = { version = "0.53", features = ["gossipsub", "noise", "yamux", "tcp", "tokio", "macros"] }
+tracing = "0.1"
+
+[package]
+name = "deadmkt-node"
+version = "0.1.5"
+edition = "2021"
+
+[[bin]]
+name = "deadmkt-node"
+path = "src/main.rs"
+
+[dependencies]
+deadmkt-config = { path = "crates/config" }
+deadmkt-keystore = { path = "crates/keystore" }
+deadmkt-crypto = { path = "crates/crypto" }
+deadmkt-chain = { path = "crates/chain" }
+deadmkt-escrow-tracker = { path = "crates/escrow_tracker" }
+deadmkt-setup = { path = "crates/setup" }
+deadmkt-storage = { path = "crates/storage" }
+deadmkt-matching = { path = "crates/matching" }
+deadmkt-gossip = { path = "crates/gossip" }
+deadmkt-gossip-validation = { path = "crates/gossip_validation" }
+deadmkt-batch-state = { path = "crates/batch_state" }
+libp2p = { workspace = true }
+deadmkt-settlement = { path = "crates/settlement" }
+deadmkt-withdrawal = { path = "crates/withdrawal" }
+deadmkt-profit = { path = "crates/profit" }
+deadmkt-strategy = { path = "crates/strategy" }
+deadmkt-node-state = { path = "crates/node_state" }
+deadmkt-gas-manager = { path = "crates/gas_manager" }
+deadmkt-orchestrator = { path = "crates/orchestrator" }
+clap = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+hex = { workspace = true }
+bcs = { workspace = true }
+rand = { workspace = true }
+
+[features]
+integration = []
+
+[dev-dependencies]
+tokio = { workspace = true }
+libp2p = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+wiremock = { workspace = true }
+tempfile = { workspace = true }
+deadmkt-crypto = { path = "crates/crypto" }
+deadmkt-chain = { path = "crates/chain" }
+deadmkt-matching = { path = "crates/matching" }
+deadmkt-escrow-tracker = { path = "crates/escrow_tracker" }
+deadmkt-settlement = { path = "crates/settlement" }
+deadmkt-withdrawal = { path = "crates/withdrawal" }
+deadmkt-profit = { path = "crates/profit" }
+deadmkt-strategy = { path = "crates/strategy" }
+deadmkt-node-state = { path = "crates/node_state" }
+deadmkt-gas-manager = { path = "crates/gas_manager" }
+deadmkt-orchestrator = { path = "crates/orchestrator" }
+deadmkt-config = { path = "crates/config" }
+deadmkt-storage = { path = "crates/storage" }
+deadmkt-gossip = { path = "crates/gossip" }
+deadmkt-gossip-validation = { path = "crates/gossip_validation" }
+deadmkt-batch-state = { path = "crates/batch_state" }
+futures-util = "0.3"
+tokio-tungstenite = "0.21"

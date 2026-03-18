@@ -1,0 +1,16 @@
+[package]
+name = "deadmkt-gossip"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deadmkt-crypto = { path = "../crypto" }
+serde = { workspace = true }
+bincode = { workspace = true }
+libp2p = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

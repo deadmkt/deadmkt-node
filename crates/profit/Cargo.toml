@@ -1,0 +1,16 @@
+[package]
+name = "deadmkt-profit"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deadmkt-chain = { path = "../chain" }
+deadmkt-config = { path = "../config" }
+deadmkt-escrow-tracker = { path = "../escrow_tracker" }
+deadmkt-storage = { path = "../storage" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

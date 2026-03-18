@@ -1,0 +1,14 @@
+[package]
+name = "deadmkt-matching"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deadmkt-crypto = { path = "../crypto" }
+sha2 = { workspace = true }
+bcs = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+hex = { workspace = true }
