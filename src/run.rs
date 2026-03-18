@@ -915,22 +915,40 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     //   - Inbound gossip messages arrive via gossip_inbound_rx channel
     //   - Outbound messages sent via swarm_cmd_tx channel
     //
-    // Two select arms:
+    // Three select arms:
     //   1. Gossip inbound — eagerly processes messages as they arrive
-    //   2. Chain poll timer — drains remaining gossip, then drives phases
+    //   2. Block update from dedicated chain poller — drives phase handling
+    //   3. Ctrl-C — graceful shutdown
     //
-    // Key improvement: the swarm is polled continuously regardless of
-    // chain tick work (async fetches, strategy timeouts). Messages are
-    // deserialized and queued immediately by the gossip task. The main
-    // loop drains them at phase evaluation time — no more stranded
-    // reveals in the libp2p buffer.
+    // N9: Chain polling runs in a dedicated tokio::spawn task. The RPC call
+    // to get_ledger_info() no longer blocks the main select loop, so gossip
+    // messages are processed without delay even during slow/stalled RPCs.
+    // This is the root cause fix for the commit timeout / WS disconnect loop.
 
     let mut last_block = ledger.block_height;
     let mut last_phase = phase;
     let mut last_batch_id = batch_id;
-    let mut chain_tick = tokio::time::interval(Duration::from_millis(200));
     let mut last_new_block_time = std::time::Instant::now();
     let stale_warn_secs = 60; // warn after 60s of no new blocks
+
+    // N9: Spawn dedicated chain poller task
+    let (block_tx, mut block_rx) = tokio::sync::watch::channel(ledger.block_height);
+    {
+        let poller_client = SupraClient::new(
+            config.rpc_urls.clone(),
+            config.contracts.settlement.clone(),
+        );
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(200));
+            loop {
+                tick.tick().await;
+                match poller_client.get_ledger_info().await {
+                    Ok(l) => { let _ = block_tx.send(l.block_height); }
+                    Err(e) => { eprintln!("[chain-poller] error: {}", e); }
+                }
+            }
+        });
+    }
 
     // SP5: Track last batch stats for strategy visibility
     let mut last_batch_data: Option<deadmkt_strategy::LastBatchData> = None;
@@ -959,27 +977,19 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                 );
             }
 
-            // ── ARM 2: Periodic chain poll + phase handling ──────────
-            _ = chain_tick.tick() => {
+            // ── ARM 2: Block update from dedicated chain poller ─────
+            //
+            // N9: The RPC call runs in a separate task. This arm only fires
+            // when a new block height is available — no await, no blocking.
+            Ok(()) = block_rx.changed() => {
+                let block = *block_rx.borrow();
+
                 // GOSSIP-1: Drain ALL buffered gossip before phase evaluation.
-                // This is the critical improvement — at MATCH phase start,
-                // we guarantee every reveal that arrived during the window
-                // is available, not just those the select loop happened to catch.
                 while let Ok(msg) = gossip_inbound_rx.try_recv() {
                     process_inbound_gossip(
                         msg, &mut gossip_validator, &mut orchestrator,
                     );
                 }
-
-                // 8a. Get latest block
-                let ledger = match chain.get_ledger_info().await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        eprintln!("[poll] chain error: {}", e);
-                        continue;
-                    }
-                };
-                let block = ledger.block_height;
 
                 if block <= last_block {
                     let stale_secs = last_new_block_time.elapsed().as_secs();
