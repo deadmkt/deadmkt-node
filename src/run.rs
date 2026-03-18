@@ -26,7 +26,6 @@ use deadmkt_orchestrator::{
 };
 use deadmkt_settlement::{SettlementManager, SettlementSubmitter};
 use deadmkt_settlement::worker::{SettleRequest, SettleResult, spawn_worker};
-use deadmkt_storage::Storage;
 use deadmkt_strategy::convert::{validate_orders, OrderValidationContext};
 use deadmkt_strategy::server::StrategyServer;
 use deadmkt_strategy::{StrategyAction, StrategyEvent};
@@ -517,8 +516,9 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
         }
     }
 
-    // ── 4. Storage + Escrow tracker ──────────────────────────────────
-    let _storage = Storage::open(data_dir)?;
+    // ── 4. Escrow tracker ───────────────────────────────────────────
+    // Storage crate exists but is not wired into the runtime yet (L4).
+    // Will be connected in a future phase for pubkey caching and batch history.
     let _tracker = Arc::new(Mutex::new(EscrowTracker::new()));
 
     // Fetch token decimals from on-chain FA metadata
