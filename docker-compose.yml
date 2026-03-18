@@ -1,124 +1,24 @@
 services:
-  node1:
+  node:
     build: .
-    container_name: deadmkt-node1
+    container_name: deadmkt-node
     stdin_open: true
     tty: true
     volumes:
-      - node1-data:/data
-      - ./strategies/bullish.py:/data/strategy.py
+      - node-data:/data
+      - ${STRATEGY_PATH:-./starter_bot/strategy.py}:/data/strategy.py
     ports:
-      - "9091:9090"   # strategy WS
-      - "9191:9191"   # gossip (if needed)
+      - "${WS_PORT:-9090}:9090"
+      - "${GOSSIP_PORT:-9191}:9191"
     environment:
       - DEADMKT_DATA_DIR=/data
-      - DEADMKT_KEYSTORE_PASSWORD=${NODE1_PASSWORD:-testnet123}
-      - DEADMKT_DIAL_PEERS=deadmkt-node2:9191
-      # Override contract address: set CONTRACT_ADDR in .env or shell
+      - DEADMKT_KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD:-}
+      - DEADMKT_AUTH_TOKEN=${AUTH_TOKEN:-}
+      - DEADMKT_DIAL_PEERS=${DIAL_PEERS:-}
       - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
-
-  node2:
-    build: .
-    container_name: deadmkt-node2
-    stdin_open: true
-    tty: true
-    volumes:
-      - node2-data:/data
-      - ./strategies/bearish.py:/data/strategy.py
-    ports:
-      - "9092:9090"
-      - "9192:9191"
-    environment:
-      - DEADMKT_DATA_DIR=/data
-      - DEADMKT_KEYSTORE_PASSWORD=${NODE2_PASSWORD:-testnet456}
-      - DEADMKT_DIAL_PEERS=deadmkt-node1:9191
-      # Override contract address: set CONTRACT_ADDR in .env or shell
-      - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
-
-  node3:
-    build: .
-    container_name: deadmkt-node3
-    stdin_open: true
-    tty: true
-    volumes:
-      - node3-data:/data
-      - ./strategies/bullish.py:/data/strategy.py
-    ports:
-      - "9093:9090"
-      - "9193:9191"
-    environment:
-      - DEADMKT_DATA_DIR=/data
-      - DEADMKT_KEYSTORE_PASSWORD=${NODE3_PASSWORD:-testnet789}
-      - DEADMKT_DIAL_PEERS=deadmkt-node1:9191,deadmkt-node2:9191
-      - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
-
-  node4:
-    build: .
-    container_name: deadmkt-node4
-    stdin_open: true
-    tty: true
-    volumes:
-      - node4-data:/data
-      - ./strategies/bearish.py:/data/strategy.py
-    ports:
-      - "9094:9090"
-      - "9194:9191"
-    environment:
-      - DEADMKT_DATA_DIR=/data
-      - DEADMKT_KEYSTORE_PASSWORD=${NODE4_PASSWORD:-testnet101}
-      - DEADMKT_DIAL_PEERS=deadmkt-node1:9191,deadmkt-node2:9191
-      - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
-
-  node5:
-    build: .
-    container_name: deadmkt-node5
-    stdin_open: true
-    tty: true
-    volumes:
-      - node5-data:/data
-      - ./strategies/bullish.py:/data/strategy.py
-    ports:
-      - "9095:9090"
-      - "9195:9191"
-    environment:
-      - DEADMKT_DATA_DIR=/data
-      - DEADMKT_KEYSTORE_PASSWORD=${NODE5_PASSWORD:-testnet202}
-      - DEADMKT_DIAL_PEERS=deadmkt-node1:9191,deadmkt-node2:9191
-      - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
-
-  node6:
-    build: .
-    container_name: deadmkt-node6
-    stdin_open: true
-    tty: true
-    volumes:
-      - node6-data:/data
-      - ./strategies/bearish.py:/data/strategy.py
-    ports:
-      - "9096:9090"
-      - "9196:9191"
-    environment:
-      - DEADMKT_DATA_DIR=/data
-      - DEADMKT_KEYSTORE_PASSWORD=${NODE6_PASSWORD:-testnet303}
-      - DEADMKT_DIAL_PEERS=deadmkt-node1:9191,deadmkt-node2:9191
-      - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
+      - DEADMKT_NO_STRATEGY=${NO_STRATEGY:-}
     restart: unless-stopped
 
 volumes:
-  node1-data:
-    name: deadmkt-node1-data
-  node2-data:
-    name: deadmkt-node2-data
-  node3-data:
-    name: deadmkt-node3-data
-  node4-data:
-    name: deadmkt-node4-data
-  node5-data:
-    name: deadmkt-node5-data
-  node6-data:
-    name: deadmkt-node6-data
+  node-data:
+    name: deadmkt-node-data
