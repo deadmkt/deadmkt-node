@@ -14,8 +14,6 @@ members = [
     "crates/batch_state",
     "crates/integration_tests",
     "crates/settlement",
-    "crates/withdrawal",
-    "crates/profit",
     "crates/strategy",
     "crates/node_state",
     "crates/gas_manager",
@@ -67,8 +65,6 @@ deadmkt-gossip-validation = { path = "crates/gossip_validation" }
 deadmkt-batch-state = { path = "crates/batch_state" }
 libp2p = { workspace = true }
 deadmkt-settlement = { path = "crates/settlement" }
-deadmkt-withdrawal = { path = "crates/withdrawal" }
-deadmkt-profit = { path = "crates/profit" }
 deadmkt-strategy = { path = "crates/strategy" }
 deadmkt-node-state = { path = "crates/node_state" }
 deadmkt-gas-manager = { path = "crates/gas_manager" }
@@ -102,8 +98,6 @@ deadmkt-chain = { path = "crates/chain" }
 deadmkt-matching = { path = "crates/matching" }
 deadmkt-escrow-tracker = { path = "crates/escrow_tracker" }
 deadmkt-settlement = { path = "crates/settlement" }
-deadmkt-withdrawal = { path = "crates/withdrawal" }
-deadmkt-profit = { path = "crates/profit" }
 deadmkt-strategy = { path = "crates/strategy" }
 deadmkt-node-state = { path = "crates/node_state" }
 deadmkt-gas-manager = { path = "crates/gas_manager" }

@@ -10,8 +10,6 @@ deadmkt-gas-manager = { path = "../gas_manager" }
 deadmkt-chain = { path = "../chain" }
 deadmkt-escrow-tracker = { path = "../escrow_tracker" }
 deadmkt-settlement = { path = "../settlement" }
-deadmkt-withdrawal = { path = "../withdrawal" }
-deadmkt-profit = { path = "../profit" }
 deadmkt-matching = { path = "../matching" }
 deadmkt-crypto = { path = "../crypto" }
 bcs = { workspace = true }
