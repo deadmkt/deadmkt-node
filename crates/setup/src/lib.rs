@@ -239,6 +239,21 @@ pub fn prompt_beneficiary(io: &mut dyn WizardIO) -> Result<String, SetupError> {
     }
 }
 
+/// Step 2b: node role selection
+/// Returns true if this is a bootstrap/relay-only node (no trading).
+pub fn prompt_node_role(io: &mut dyn WizardIO) -> Result<bool, SetupError> {
+    io.print("\nNode role:\n");
+    io.print("  1) Trading node (full setup — NFT + tokens + escrow)\n");
+    io.print("  2) Bootstrap/relay node (NFT only — no trading)\n");
+    io.print("> ");
+    let input = io.read_line()?;
+    let bootstrap_only = input.trim() == "2";
+    if bootstrap_only {
+        io.print("Bootstrap mode: will mint NFT only, no token minting or escrow deposit.\n");
+    }
+    Ok(bootstrap_only)
+}
+
 /// Step 3: keypair generation + keystore save (or load existing)
 pub fn wizard_generate_keypair(
     io: &mut dyn WizardIO,
@@ -301,8 +316,9 @@ pub fn wizard_generate_keypair(
 /// SUPRA_PER_TOKEN_UNIT = 100 quants per base unit.
 const SUPRA_PER_TOKEN_UNIT: u64 = 100;
 
-/// Reserve 30% of SUPRA for gas, use 70% for minting.
-const MINT_SUPRA_FRACTION_PCT: u64 = 70;
+/// Reserve 70% of SUPRA for gas, use 30% for minting.
+/// Strategy can mint more on-demand if needed.
+const MINT_SUPRA_FRACTION_PCT: u64 = 30;
 
 /// Step 4: wait for funding
 /// On testnet, waits for SUPRA then mints Trippples tokens (EMM/KAY/TEE).
@@ -792,6 +808,9 @@ pub async fn run_wizard(
     // Step 2
     let beneficiary = prompt_beneficiary(io)?;
 
+    // Step 2b
+    let bootstrap_only = prompt_node_role(io)?;
+
     // Step 3
     let (address, public, secret) = wizard_generate_keypair(io, &keystore_path)?;
 
@@ -805,8 +824,8 @@ pub async fn run_wizard(
     // Step 4
     io.print(&format!("\nWaiting for funding to {}...\n", address));
     io.print("(send some Supra to this address for capital and gas)...\n");
-    if network == Network::Testnet {
-        io.print("(testnet: send SUPRA only -- EMM/KAY/TEE will be auto-minted from 70% of your SUPRA)\n");
+    if network == Network::Testnet && !bootstrap_only {
+        io.print("(testnet: send SUPRA only -- EMM/KAY/TEE will be auto-minted from 30% of your SUPRA)\n");
     }
     let funding = wait_for_funding(io, chain, &address, &network, std::time::Duration::from_secs(5)).await?;
 
@@ -826,17 +845,34 @@ pub async fn run_wizard(
     register_and_deposit(chain, nft_id, &withdrawal, &funding).await?;
 
     // Step 6b: mint tokens and deposit (testnet: auto-mint after registration)
-    let tokens = if network == Network::Testnet {
+    // Bootstrap nodes skip token minting entirely.
+    let tokens = if bootstrap_only {
+        io.print("  Bootstrap mode: skipping token minting and escrow deposit.\n");
+        vec![]
+    } else if network == Network::Testnet {
         auto_mint_and_deposit(io, chain, funding.supra).await?
     } else {
         funding.tokens.clone()
     };
 
-    // Step 7
-    let profit = prompt_profit_config(io, &tokens)?;
+    // Step 7 (skip for bootstrap — no trading, no profit config needed)
+    let profit = if bootstrap_only {
+        ProfitConfig {
+            base_capital: HashMap::new(),
+            threshold_pct: 0,
+            transfer_mode: "all_excess".into(),
+            transfer_mode_value: None,
+        }
+    } else {
+        prompt_profit_config(io, &tokens)?
+    };
 
-    // Step 8
-    let auth_token = wizard_generate_auth_token(io);
+    // Step 8 (generate token silently for bootstrap — node config expects it)
+    let auth_token = if bootstrap_only {
+        generate_strategy_auth_token()
+    } else {
+        wizard_generate_auth_token(io)
+    };
 
     // Step 9
     let bootstrap_peers = wizard_bootstrap_peers(io, &network);
@@ -1379,8 +1415,8 @@ mod tests {
 
         let mut io = MockIO::new();
         io.queue_input("");                       // press enter to begin
-        io.queue_input("1");                      // network: testnet
-        io.queue_input("0xBENEF");                // beneficiary
+        io.queue_input("0xBENEFICIARY1234");      // beneficiary
+        io.queue_input("1");                      // node role: trading
         io.queue_input("test-pass");              // password
         io.queue_input("test-pass");              // confirm
         io.queue_input("y");                      // mint bond confirm
@@ -1407,10 +1443,45 @@ mod tests {
         assert_eq!(config.network, Network::Testnet);
         assert_eq!(config.nft_id, 42);
         assert!(!config.trustee_address.is_empty());
-        assert_eq!(config.beneficiary_address, "0xBENEF");
+        assert_eq!(config.beneficiary_address, "0xBENEFICIARY1234");
         assert!(config.sponsor_address.is_empty());
         assert_eq!(config.withdrawal_rules.holding_period_days, 90);
         assert!(config.withdrawal_rules.rushed_withdrawal_enabled);
+    }
+
+    // T_SETUP_13b
+    #[tokio::test]
+    async fn test_wizard_bootstrap_only_skips_minting() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut io = MockIO::new();
+        io.queue_input("");                       // press enter to begin
+        io.queue_input("0xBENEFICIARY1234");      // beneficiary
+        io.queue_input("2");                      // node role: bootstrap/relay
+        io.queue_input("test-pass");              // password
+        io.queue_input("test-pass");              // confirm
+        io.queue_input("y");                      // mint bond confirm
+        io.queue_input("");                       // holding period default
+        io.queue_input("y");                      // rushed
+
+        let mut mock = MockChainClient::default_success();
+        mock.is_trustee_val = false;
+        {
+            let mut q = mock.balance_responses.lock().unwrap();
+            q.push_back(WalletBalance {
+                supra: 50_000_000_000,
+                tokens: vec![],
+            });
+        }
+
+        let result = run_wizard(&mut io, &mock, dir.path()).await;
+        assert!(result.is_ok());
+
+        let config = result.unwrap();
+        assert_eq!(config.profit_taking.threshold_pct, 0);
+        assert!(config.profit_taking.base_capital.is_empty());
+        // Auth token still generated (needed for config)
+        assert!(!config.strategy_auth_token.is_empty());
     }
 
     // T_SETUP_14
