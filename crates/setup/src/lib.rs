@@ -181,6 +181,31 @@ pub trait ChainClient: Send + Sync {
         Box::pin(async { Ok(0) })
     }
 
+    /// Get escrow balance for an nft_id + token metadata.
+    fn get_escrow_balance(
+        &self,
+        _nft_id: u64,
+        _metadata_address: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, SetupError>> + Send + '_>> {
+        Box::pin(async { Ok(0) })
+    }
+
+    /// Get per-trustee mint state: (first_mint_completed, has_pending).
+    fn get_nft_mint_state(
+        &self,
+        _address: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(bool, bool), SetupError>> + Send + '_>> {
+        Box::pin(async { Ok((false, false)) })
+    }
+
+    /// Get pending mint details: Option<claimable_at timestamp>.
+    fn get_pending_mint_claimable_at(
+        &self,
+        _address: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<u64>, SetupError>> + Send + '_>> {
+        Box::pin(async { Ok(None) })
+    }
+
     /// Call tokens::burn_from_escrow(amount). Withdraws triples from escrow,
     /// burns them, returns SUPRA. C2 contract function.
     fn submit_burn_from_escrow(
@@ -516,205 +541,227 @@ pub async fn register_and_deposit(
 
 /// Auto-mint Trippples tokens and deposit to escrow.
 /// Called AFTER registration so request_mint can verify the caller is registered.
-/// Skips minting if tokens already exist in wallet (from a previous run).
+///
+/// Checks in order:
+/// 1. Tokens already in escrow → skip minting entirely, strategy manages from here
+/// 2. Tokens in wallet → deposit to escrow
+/// 3. Pending mint claimable → claim, deposit
+/// 4. Pending mint not yet claimable → skip, strategy will claim later
+/// 5. No pending mint → request first mint, wait for claim (first mint ~8 min)
 pub async fn auto_mint_and_deposit(
     io: &mut dyn WizardIO,
     chain: &dyn ChainClient,
     supra_balance: u64,
+    nft_id: u64,
+    trustee_address: &str,
 ) -> Result<Vec<TokenBalance>, SetupError> {
-    // Look up metadata addresses (deterministic, no RPC)
     let emm_meta = chain.get_trippples_metadata(0).await?;
     let kay_meta = chain.get_trippples_metadata(1).await?;
     let tee_meta = chain.get_trippples_metadata(2).await?;
 
-    // Check if tokens already exist in wallet from a previous run
-    let emm_bal = chain.get_fa_balance(&emm_meta).await.unwrap_or(0);
-    let kay_bal = chain.get_fa_balance(&kay_meta).await.unwrap_or(0);
-    let tee_bal = chain.get_fa_balance(&tee_meta).await.unwrap_or(0);
+    // ── Check 1: tokens already in escrow ──
+    let esc_emm = chain.get_escrow_balance(nft_id, &emm_meta).await.unwrap_or(0);
+    let esc_kay = chain.get_escrow_balance(nft_id, &kay_meta).await.unwrap_or(0);
+    let esc_tee = chain.get_escrow_balance(nft_id, &tee_meta).await.unwrap_or(0);
 
-    io.print(&format!("  Balance check: EMM={}, KAY={}, TEE={}\n", emm_bal, kay_bal, tee_bal));
+    if esc_emm > 0 || esc_kay > 0 || esc_tee > 0 {
+        io.print(&format!("  Escrow already funded: EMM={:.5}, KAY={:.5}, TEE={:.5}\n",
+            esc_emm as f64 / 100_000.0, esc_kay as f64 / 100_000.0, esc_tee as f64 / 100_000.0));
+        io.print("  Strategy will manage token minting from here.\n");
+        return Ok(vec![
+            TokenBalance { symbol: "EMM".into(), amount: esc_emm, metadata_address: emm_meta },
+            TokenBalance { symbol: "KAY".into(), amount: esc_kay, metadata_address: kay_meta },
+            TokenBalance { symbol: "TEE".into(), amount: esc_tee, metadata_address: tee_meta },
+        ]);
+    }
 
-    if emm_bal > 0 && kay_bal > 0 && tee_bal > 0 {
-        io.print("  Tokens already in wallet from previous run.\n");
-        io.print(&format!("    EMM: {:.5}, KAY: {:.5}, TEE: {:.5}\n",
-            emm_bal as f64 / 100_000.0,
-            kay_bal as f64 / 100_000.0,
-            tee_bal as f64 / 100_000.0,
-        ));
+    // ── Check 2: tokens in wallet ──
+    let wal_emm = chain.get_fa_balance(&emm_meta).await.unwrap_or(0);
+    let wal_kay = chain.get_fa_balance(&kay_meta).await.unwrap_or(0);
+    let wal_tee = chain.get_fa_balance(&tee_meta).await.unwrap_or(0);
 
-        io.print("    Depositing to escrow...\n");
-        let dep1 = chain.submit_deposit(&emm_meta, emm_bal).await?;
+    io.print(&format!("  Balance check: wallet EMM={}, KAY={}, TEE={}\n", wal_emm, wal_kay, wal_tee));
+
+    if wal_emm > 0 && wal_kay > 0 && wal_tee > 0 {
+        io.print("  Tokens in wallet — depositing to escrow...\n");
+        let dep1 = chain.submit_deposit(&emm_meta, wal_emm).await?;
         if !dep1.success {
             return Err(SetupError::ChainError(format!("EMM deposit failed: {}", dep1.vm_status)));
         }
-        let dep2 = chain.submit_deposit(&kay_meta, kay_bal).await?;
+        let dep2 = chain.submit_deposit(&kay_meta, wal_kay).await?;
         if !dep2.success {
             return Err(SetupError::ChainError(format!("KAY deposit failed: {}", dep2.vm_status)));
         }
-        let dep3 = chain.submit_deposit(&tee_meta, tee_bal).await?;
+        let dep3 = chain.submit_deposit(&tee_meta, wal_tee).await?;
         if !dep3.success {
             return Err(SetupError::ChainError(format!("TEE deposit failed: {}", dep3.vm_status)));
         }
         io.print("    Deposited!\n");
-
         return Ok(vec![
-            TokenBalance { symbol: "EMM".into(), amount: emm_bal, metadata_address: emm_meta },
-            TokenBalance { symbol: "KAY".into(), amount: kay_bal, metadata_address: kay_meta },
-            TokenBalance { symbol: "TEE".into(), amount: tee_bal, metadata_address: tee_meta },
+            TokenBalance { symbol: "EMM".into(), amount: wal_emm, metadata_address: emm_meta },
+            TokenBalance { symbol: "KAY".into(), amount: wal_kay, metadata_address: kay_meta },
+            TokenBalance { symbol: "TEE".into(), amount: wal_tee, metadata_address: tee_meta },
         ]);
     }
 
-    io.print("  Minting Trippples tokens...\n");
+    // ── Check 3/4: pending mint state ──
+    let (first_mint_done, has_pending) = chain.get_nft_mint_state(trustee_address).await.unwrap_or((false, false));
 
-    // Calculate even mint: 70% of SUPRA -> tokens, split 3 ways
+    if has_pending {
+        // Check if claimable now
+        let claimable_at = chain.get_pending_mint_claimable_at(trustee_address).await.unwrap_or(None);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+
+        if let Some(at) = claimable_at {
+            if now >= at {
+                io.print("  Pending mint is claimable — claiming...\n");
+                let claim = chain.submit_claim_mint().await?;
+                if !claim.success {
+                    return Err(SetupError::ChainError(format!("Claim failed: {}", claim.vm_status)));
+                }
+                io.print("    Claimed! Waiting for tokens...\n");
+                // Poll wallet until tokens appear
+                for poll in 1..=30 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let e = chain.get_fa_balance(&emm_meta).await.unwrap_or(0);
+                    let k = chain.get_fa_balance(&kay_meta).await.unwrap_or(0);
+                    let t = chain.get_fa_balance(&tee_meta).await.unwrap_or(0);
+                    if e > 0 && k > 0 && t > 0 {
+                        io.print(&format!("    Tokens arrived: EMM={:.5}, KAY={:.5}, TEE={:.5}\n",
+                            e as f64 / 100_000.0, k as f64 / 100_000.0, t as f64 / 100_000.0));
+                        io.print("    Depositing to escrow...\n");
+                        chain.submit_deposit(&emm_meta, e).await?;
+                        chain.submit_deposit(&kay_meta, k).await?;
+                        chain.submit_deposit(&tee_meta, t).await?;
+                        io.print("    Deposited!\n");
+                        return Ok(vec![
+                            TokenBalance { symbol: "EMM".into(), amount: e, metadata_address: emm_meta },
+                            TokenBalance { symbol: "KAY".into(), amount: k, metadata_address: kay_meta },
+                            TokenBalance { symbol: "TEE".into(), amount: t, metadata_address: tee_meta },
+                        ]);
+                    }
+                    if poll % 5 == 0 {
+                        io.print(&format!("    Waiting for tokens... ({}/30)\n", poll));
+                    }
+                }
+                return Err(SetupError::ChainError(
+                    "Claim succeeded but tokens not visible after 90s. Re-run setup.".into(),
+                ));
+            }
+        }
+
+        // Pending but not yet claimable — strategy will handle it
+        let wait_str = claimable_at.map(|at| {
+            let remaining = at.saturating_sub(now);
+            let hours = remaining / 3600;
+            let mins = (remaining % 3600) / 60;
+            format!("~{}h {}m remaining", hours, mins)
+        }).unwrap_or_else(|| "unknown wait time".into());
+        io.print(&format!("  Pending mint found ({}) — strategy will claim when ready.\n", wait_str));
+        io.print("  Node can start trading once tokens are claimed and deposited.\n");
+        return Ok(vec![]);
+    }
+
+    // ── Check 5: no pending mint — request first mint ──
+    if first_mint_done {
+        // Second+ mint goes through global vDRF — could be days
+        io.print("  First mint already completed. Requesting additional tokens...\n");
+        io.print("  NOTE: subsequent mints use the global hold period (may take days).\n");
+    } else {
+        io.print("  Minting Trippples tokens (first mint ~8 min hold)...\n");
+    }
+
     let available_supra = supra_balance * MINT_SUPRA_FRACTION_PCT / 100;
     let total_base_units = available_supra / SUPRA_PER_TOKEN_UNIT;
     let each = (total_base_units / 3 / 1_000_000) * 1_000_000;
 
     if each == 0 {
-        // Not enough SUPRA to mint — tokens may already exist from a previous run.
-        io.print("  Not enough SUPRA to mint. Checking for existing tokens...\n");
-
-        let emm_meta = chain.get_trippples_metadata(0).await?;
-        let kay_meta = chain.get_trippples_metadata(1).await?;
-        let tee_meta = chain.get_trippples_metadata(2).await?;
-
-        let emm_bal = chain.get_fa_balance(&emm_meta).await.unwrap_or(0);
-        let kay_bal = chain.get_fa_balance(&kay_meta).await.unwrap_or(0);
-        let tee_bal = chain.get_fa_balance(&tee_meta).await.unwrap_or(0);
-
-        if emm_bal > 0 && kay_bal > 0 && tee_bal > 0 {
-            io.print(&format!("    Found: {:.5} EMM, {:.5} KAY, {:.5} TEE\n",
-                emm_bal as f64 / 100_000.0,
-                kay_bal as f64 / 100_000.0,
-                tee_bal as f64 / 100_000.0,
-            ));
-            io.print("    Depositing to escrow...\n");
-            chain.submit_deposit(&emm_meta, emm_bal).await?;
-            chain.submit_deposit(&kay_meta, kay_bal).await?;
-            chain.submit_deposit(&tee_meta, tee_bal).await?;
-            io.print("    Deposited!\n");
-
-            return Ok(vec![
-                TokenBalance { symbol: "EMM".into(), amount: emm_bal, metadata_address: emm_meta },
-                TokenBalance { symbol: "KAY".into(), amount: kay_bal, metadata_address: kay_meta },
-                TokenBalance { symbol: "TEE".into(), amount: tee_bal, metadata_address: tee_meta },
-            ]);
-        }
-
         return Err(SetupError::ChainError(
-            "Insufficient SUPRA to mint and no existing tokens found. Fund with more SUPRA and try again.".into(),
+            "Insufficient SUPRA to mint. Fund with more SUPRA and try again.".into(),
         ));
     }
 
-    let total = each * 3;
-    let supra_cost = total * SUPRA_PER_TOKEN_UNIT;
     let tokens_display = each as f64 / 100_000.0;
-    let supra_display = supra_cost as f64 / 100_000_000.0;
+    let supra_display = (each * 3 * SUPRA_PER_TOKEN_UNIT) as f64 / 100_000_000.0;
+    io.print(&format!("    Minting {:.5} EMM, {:.5} KAY, {:.5} TEE ({:.8} SUPRA)\n",
+        tokens_display, tokens_display, tokens_display, supra_display));
 
-    io.print(&format!(
-        "    Minting {:.5} EMM, {:.5} KAY, {:.5} TEE ({:.8} SUPRA)\n",
-        tokens_display, tokens_display, tokens_display, supra_display,
-    ));
-
-    // request_mint (skip if already pending from a previous run)
     let mint_result = chain.submit_request_mint(each, each, each).await?;
     if !mint_result.success {
         if mint_result.vm_status.contains("HAS_PENDING_MINT") || mint_result.vm_status.contains("E_HAS_PENDING_MINT") {
-            io.print("    Pending mint found from previous run. Attempting to claim...\n");
-        } else {
-            return Err(SetupError::ChainError(
-                format!("Failed to request mint: {}", mint_result.vm_status),
-            ));
+            io.print("    Pending mint exists — strategy will claim when ready.\n");
+            return Ok(vec![]);
         }
-    } else {
-        io.print("    Mint requested. Waiting for hold period (first mint ~8 min)...\n");
+        return Err(SetupError::ChainError(format!("Failed to request mint: {}", mint_result.vm_status)));
     }
 
-    // Poll for claim readiness (hold period must expire)
-    let max_attempts = 120; // 120 * 10s = 20 min max wait
-    for attempt in 1..=max_attempts {
-        cancellable_sleep(std::time::Duration::from_secs(10)).await?;
-        let claim_result = chain.submit_claim_mint().await?;
-        if claim_result.success {
-            io.print("    Tokens claimed!\n");
-            break;
+    // First mint: wait for ~8 min hold period
+    if !first_mint_done {
+        io.print("    Mint requested. Waiting for first-mint hold period...\n");
+        let max_attempts = 60; // 60 * 10s = 10 min
+        for attempt in 1..=max_attempts {
+            cancellable_sleep(std::time::Duration::from_secs(10)).await?;
+            let claim_result = chain.submit_claim_mint().await?;
+            if claim_result.success {
+                io.print("    Tokens claimed!\n");
+                // Poll wallet until tokens appear
+                io.print("    Waiting for tokens to appear in wallet...\n");
+                for poll in 1..=30 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let e = chain.get_fa_balance(&emm_meta).await.unwrap_or(0);
+                    let k = chain.get_fa_balance(&kay_meta).await.unwrap_or(0);
+                    let t = chain.get_fa_balance(&tee_meta).await.unwrap_or(0);
+                    if e > 0 && k > 0 && t > 0 {
+                        io.print(&format!("    Tokens arrived: EMM={:.5}, KAY={:.5}, TEE={:.5}\n",
+                            e as f64 / 100_000.0, k as f64 / 100_000.0, t as f64 / 100_000.0));
+                        io.print("    Depositing to escrow...\n");
+                        let dep1 = chain.submit_deposit(&emm_meta, e).await?;
+                        if !dep1.success {
+                            return Err(SetupError::ChainError(format!("EMM deposit failed: {}", dep1.vm_status)));
+                        }
+                        let dep2 = chain.submit_deposit(&kay_meta, k).await?;
+                        if !dep2.success {
+                            return Err(SetupError::ChainError(format!("KAY deposit failed: {}", dep2.vm_status)));
+                        }
+                        let dep3 = chain.submit_deposit(&tee_meta, t).await?;
+                        if !dep3.success {
+                            return Err(SetupError::ChainError(format!("TEE deposit failed: {}", dep3.vm_status)));
+                        }
+                        io.print("    Deposited!\n");
+                        return Ok(vec![
+                            TokenBalance { symbol: "EMM".into(), amount: e, metadata_address: emm_meta },
+                            TokenBalance { symbol: "KAY".into(), amount: k, metadata_address: kay_meta },
+                            TokenBalance { symbol: "TEE".into(), amount: t, metadata_address: tee_meta },
+                        ]);
+                    }
+                    if poll % 5 == 0 {
+                        io.print(&format!("    Waiting for tokens... ({}/30)\n", poll));
+                    }
+                }
+                return Err(SetupError::ChainError(
+                    "Claim succeeded but tokens not visible after 90s. Re-run setup.".into(),
+                ));
+            }
+            let status = &claim_result.vm_status;
+            if status.contains("HOLD_PERIOD_ACTIVE") {
+                io.print(&format!("    Hold period active, retrying in 10s... ({}/{})\n", attempt, max_attempts));
+            } else if status.contains("INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE") {
+                return Err(SetupError::ChainError(
+                    "Wallet out of gas. Fund the trustee address with more SUPRA and re-run setup.".into(),
+                ));
+            } else {
+                io.print(&format!("    Claim failed: {} — retrying ({}/{})\n", status, attempt, max_attempts));
+            }
         }
-        // Log the ACTUAL error — don't hide it behind "Hold period active"
-        let status = &claim_result.vm_status;
-        if status.contains("HOLD_PERIOD_ACTIVE") {
-            io.print(&format!("    Hold period active, retrying in 10s... ({}/{})\n", attempt, max_attempts));
-        } else if status.contains("INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE") {
-            return Err(SetupError::ChainError(
-                "Wallet out of gas. Fund the trustee address with more SUPRA and re-run setup.".into(),
-            ));
-        } else {
-            // Unknown error — show it so we can debug
-            io.print(&format!("    Claim failed: {} — retrying ({}/{})\n", status, attempt, max_attempts));
-        }
-        if attempt == max_attempts {
-            return Err(SetupError::ChainError(
-                format!("Timed out waiting to claim mint after {} attempts. Last error: {}", max_attempts, status),
-            ));
-        }
+        return Err(SetupError::ChainError(
+            "Timed out waiting for first mint claim. Re-run setup to try again.".into(),
+        ));
     }
 
-    // Look up metadata addresses for deposit
-    let emm_meta = chain.get_trippples_metadata(0).await?;
-    let kay_meta = chain.get_trippples_metadata(1).await?;
-    let tee_meta = chain.get_trippples_metadata(2).await?;
-    io.print(&format!("    EMM metadata: {}\n", emm_meta));
-    io.print(&format!("    KAY metadata: {}\n", kay_meta));
-    io.print(&format!("    TEE metadata: {}\n", tee_meta));
-
-    // Poll wallet balances until tokens appear (chain propagation after claim)
-    io.print("    Waiting for tokens to appear in wallet...\n");
-    let mut actual_emm = 0u64;
-    let mut actual_kay = 0u64;
-    let mut actual_tee = 0u64;
-    for poll in 1..=30 {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        actual_emm = chain.get_fa_balance(&emm_meta).await.unwrap_or(0);
-        actual_kay = chain.get_fa_balance(&kay_meta).await.unwrap_or(0);
-        actual_tee = chain.get_fa_balance(&tee_meta).await.unwrap_or(0);
-        if actual_emm > 0 && actual_kay > 0 && actual_tee > 0 {
-            io.print(&format!("    Tokens arrived after {}s\n", poll * 3));
-            break;
-        }
-        if poll % 5 == 0 {
-            io.print(&format!("    Still waiting... ({}/30)\n", poll));
-        }
-        if poll == 30 {
-            return Err(SetupError::ChainError(
-                "Tokens not visible in wallet after 90s. Claim succeeded — re-run setup to retry deposit.".into(),
-            ));
-        }
-    }
-
-    io.print(&format!("    Depositing {:.5} EMM, {:.5} KAY, {:.5} TEE to escrow...\n",
-        actual_emm as f64 / 100_000.0,
-        actual_kay as f64 / 100_000.0,
-        actual_tee as f64 / 100_000.0,
-    ));
-    let dep1 = chain.submit_deposit(&emm_meta, actual_emm).await?;
-    if !dep1.success {
-        return Err(SetupError::ChainError(format!("EMM deposit failed: {}", dep1.vm_status)));
-    }
-    let dep2 = chain.submit_deposit(&kay_meta, actual_kay).await?;
-    if !dep2.success {
-        return Err(SetupError::ChainError(format!("KAY deposit failed: {}", dep2.vm_status)));
-    }
-    let dep3 = chain.submit_deposit(&tee_meta, actual_tee).await?;
-    if !dep3.success {
-        return Err(SetupError::ChainError(format!("TEE deposit failed: {}", dep3.vm_status)));
-    }
-    io.print("    Deposited!\n");
-
-    Ok(vec![
-        TokenBalance { symbol: "EMM".into(), amount: actual_emm, metadata_address: emm_meta },
-        TokenBalance { symbol: "KAY".into(), amount: actual_kay, metadata_address: kay_meta },
-        TokenBalance { symbol: "TEE".into(), amount: actual_tee, metadata_address: tee_meta },
-    ])
+    // Non-first mint: don't wait, let strategy handle it
+    io.print("    Mint requested — strategy will claim when hold period expires.\n");
+    Ok(vec![])
 }
 
 /// Step 7: profit-taking config
@@ -869,7 +916,7 @@ pub async fn run_wizard(
         io.print("  Bootstrap mode: skipping token minting and escrow deposit.\n");
         vec![]
     } else if network == Network::Testnet {
-        auto_mint_and_deposit(io, chain, funding.supra).await?
+        auto_mint_and_deposit(io, chain, funding.supra, nft_id, &address).await?
     } else {
         funding.tokens.clone()
     };

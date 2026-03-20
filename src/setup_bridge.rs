@@ -722,6 +722,81 @@ impl ChainClient for SupraSetupClient {
         })
     }
 
+    fn get_escrow_balance(
+        &self,
+        nft_id: u64,
+        metadata_address: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, SetupError>> + Send + '_>> {
+        let meta = metadata_address.to_string();
+        Box::pin(async move {
+            match self.client
+                .view_raw("escrow", "get_balance", vec![],
+                    vec![Value::String(nft_id.to_string()), Value::String(meta)])
+                .await
+            {
+                Ok(val) => {
+                    let balance = val.get(0).map(|v| Self::parse_u64(v)).unwrap_or(0);
+                    Ok(balance)
+                }
+                Err(_) => Ok(0),
+            }
+        })
+    }
+
+    fn get_nft_mint_state(
+        &self,
+        address: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<(bool, bool), SetupError>> + Send + '_>> {
+        let addr = address.to_string();
+        Box::pin(async move {
+            match self.client
+                .view_raw("tokens", "get_nft_mint_state", vec![],
+                    vec![Value::String(addr)])
+                .await
+            {
+                Ok(val) => {
+                    let first_completed = val.get(0).and_then(|v| v.as_bool()).unwrap_or(false);
+                    let has_pending = val.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
+                    Ok((first_completed, has_pending))
+                }
+                Err(_) => Ok((false, false)),
+            }
+        })
+    }
+
+    fn get_pending_mint_claimable_at(
+        &self,
+        address: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<u64>, SetupError>> + Send + '_>> {
+        let addr = address.to_string();
+        Box::pin(async move {
+            match self.client
+                .view_raw("tokens", "get_pending_mint", vec![],
+                    vec![Value::String(addr)])
+                .await
+            {
+                Ok(val) => {
+                    // Returns Option<PendingMint> as { vec: [...] }
+                    let vec_val = val.get(0)
+                        .and_then(|v| v.get("vec"))
+                        .and_then(|v| v.as_array());
+                    match vec_val {
+                        Some(arr) if !arr.is_empty() => {
+                            // PendingMint has claimable_at field
+                            let mint = &arr[0];
+                            let claimable = mint.get("claimable_at")
+                                .map(|v| Self::parse_u64(v))
+                                .unwrap_or(0);
+                            Ok(Some(claimable))
+                        }
+                        _ => Ok(None),
+                    }
+                }
+                Err(_) => Ok(None),
+            }
+        })
+    }
+
     fn submit_burn_from_escrow(
         &self,
         amount: u64,
