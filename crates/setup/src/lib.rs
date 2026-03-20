@@ -667,10 +667,23 @@ pub async fn auto_mint_and_deposit(
     io.print(&format!("    KAY metadata: {}\n", kay_meta));
     io.print(&format!("    TEE metadata: {}\n", tee_meta));
 
+    // Brief delay for chain state to propagate after claim
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
     // Deposit to escrow — use actual wallet balance (may differ from `each` if resuming)
-    let actual_emm = chain.get_fa_balance(&emm_meta).await.unwrap_or(each);
-    let actual_kay = chain.get_fa_balance(&kay_meta).await.unwrap_or(each);
-    let actual_tee = chain.get_fa_balance(&tee_meta).await.unwrap_or(each);
+    // Fall back to minted amount if balance query returns 0 (propagation delay)
+    let actual_emm = match chain.get_fa_balance(&emm_meta).await {
+        Ok(b) if b > 0 => b,
+        _ => each,
+    };
+    let actual_kay = match chain.get_fa_balance(&kay_meta).await {
+        Ok(b) if b > 0 => b,
+        _ => each,
+    };
+    let actual_tee = match chain.get_fa_balance(&tee_meta).await {
+        Ok(b) if b > 0 => b,
+        _ => each,
+    };
 
     io.print(&format!("    Depositing {:.5} EMM, {:.5} KAY, {:.5} TEE to escrow...\n",
         actual_emm as f64 / 100_000.0,
