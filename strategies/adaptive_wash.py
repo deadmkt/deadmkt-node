@@ -51,8 +51,6 @@ ESCROW_THRESHOLD = Decimal("5.0")
 _nft_id = None
 _mint_sent_at = 0
 _mint_pending = False
-_claim_sent = False
-_funded = False
 
 
 # ── Deterministic role assignment ─────────────────────────────────────
@@ -152,28 +150,17 @@ def _build_orders(escrow, batch_id, peers_in_pool):
     return orders
 
 
-# ── on_auth: capture nft_id + blind mint ──────────────────────────────
+# ── on_auth: capture nft_id ────────────────────────────────────────────
 def on_auth(data):
-    global _nft_id, _mint_sent_at, _mint_pending
+    global _nft_id
     _nft_id = data.get("nft_id")
     log.info(f"Authenticated as NFT {_nft_id}")
-
-    if _funded or _mint_pending:
-        return []
-    now = time.time()
-    if (now - _mint_sent_at) < MINT_COOLDOWN_SECS:
-        return []
-
-    amount = 5000000  # 50.00000 raw
-    log.info(f"on_auth: blind mint {amount} each (15 SUPRA)")
-    _mint_sent_at = now
-    _mint_pending = True
-    return [{"action": "mint", "m": amount, "k": amount, "t": amount}]
+    return []
 
 
 # ── on_batch_start ────────────────────────────────────────────────────
 def on_batch_start(ctx):
-    global _mint_sent_at, _mint_pending, _claim_sent, _funded
+    global _mint_sent_at, _mint_pending
 
     escrow = ctx.get("escrow", {})
     mint_state = ctx.get("mint_state", {})
@@ -182,30 +169,22 @@ def on_batch_start(ctx):
     peers_in_pool = ctx.get("peers_in_pool", 0)
     token_actions = []
 
-    # Check if escrow is funded
-    total = sum(Decimal(escrow.get(t, "0")) for t in ["EMM", "KAY", "TEE"])
-    if total >= MIN_BALANCE * 3:
-        _funded = True
-        _mint_pending = False
-        _claim_sent = False
+    # ── Token management (non-blocking) ──
 
-    # ── Claim pending mint ──
+    # Claim pending mint if ready
     if mint_state.get("has_pending_mint", False):
         claimable_at = mint_state.get("pending_claimable_at", 0)
         now = int(time.time())
         if claimable_at > 0 and now >= claimable_at:
             log.info("Mint claimable — sending claim_mint")
             token_actions.append({"action": "claim_mint"})
-            _claim_sent = True
-            return {"orders": [], "token_actions": token_actions}
+            _mint_pending = False
         else:
             wait = claimable_at - now if claimable_at > 0 else "?"
-            if int(now) % 30 == 0:
-                log.info(f"Mint pending, claimable in {wait}s")
-            return []
-
-    # ── Request mint if needed ──
-    if _needs_mint(escrow) and not _mint_pending:
+            if int(now) % 60 == 0:
+                log.info(f"Mint pending, claimable in {wait}s — trading continues")
+    elif _needs_mint(escrow) and not _mint_pending:
+        # Request mint if escrow low and no pending mint
         now = time.time()
         if (now - _mint_sent_at) > MINT_COOLDOWN_SECS:
             raw = _calc_mint_amount(gas_balance)
@@ -217,17 +196,15 @@ def on_batch_start(ctx):
                 token_actions.append({"action": "mint", "m": raw, "k": raw, "t": raw})
                 _mint_sent_at = now
                 _mint_pending = True
-                return {"orders": [], "token_actions": token_actions}
             else:
                 log.warning(f"Escrow low but can't afford mint (gas={gas_balance})")
-        return []
 
-    # ── Not funded yet, just wait ──
-    if not _funded:
-        return []
+    # ── Always trade with whatever escrow is available ──
+    orders = _build_orders(escrow, batch_id, peers_in_pool)
 
-    # ── Normal trading ──
-    return _build_orders(escrow, batch_id, peers_in_pool)
+    if token_actions:
+        return {"orders": orders, "token_actions": token_actions}
+    return orders
 
 
 def on_reveal(ctx, my_commits):
@@ -243,14 +220,12 @@ def on_settlement(ctx, result):
 
 
 def on_token_result(data):
-    global _mint_pending, _funded
+    global _mint_pending
     action = data.get("data", {}).get("action", data.get("action", "?"))
     success = data.get("data", {}).get("success", data.get("success", False))
     message = data.get("data", {}).get("message", data.get("message", ""))
     if success:
         log.info(f"Token OK: {action} — {message}")
-        if action == "auto_deposit":
-            _funded = True
     else:
         log.warning(f"Token FAILED: {action} — {message}")
         if action == "mint":
