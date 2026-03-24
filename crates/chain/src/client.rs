@@ -23,6 +23,16 @@ pub enum ChainError {
 
     #[error("all RPC endpoints failed")]
     AllEndpointsFailed,
+
+    #[error("rate limited (HTTP {status})")]
+    RateLimited { status: u16 },
+}
+
+impl ChainError {
+    /// Returns true if the error indicates RPC rate limiting.
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, ChainError::RateLimited { .. })
+    }
 }
 
 // =========================================================================
@@ -81,6 +91,22 @@ impl SupraClient {
         }
     }
 
+    /// Check an HTTP response for rate limiting before attempting JSON parse.
+    fn check_rate_limit(resp: &reqwest::Response) -> Result<(), ChainError> {
+        let status = resp.status().as_u16();
+        if status == 429 || status == 403 || status == 503 {
+            return Err(ChainError::RateLimited { status });
+        }
+        if let Some(ct) = resp.headers().get("content-type") {
+            if let Ok(ct_str) = ct.to_str() {
+                if ct_str.contains("text/html") {
+                    return Err(ChainError::RateLimited { status });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn next_endpoint(&self) -> String {
         let idx = self.current_endpoint.fetch_add(1, Ordering::Relaxed) % self.endpoints.len();
         self.endpoints[idx].clone()
@@ -127,37 +153,42 @@ impl SupraClient {
             let url = format!("{}/rpc/v2/view", base);
 
             match self.http.post(&url).json(&body).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    let json: Value = resp.json().await.map_err(|e| {
-                        ChainError::DeserializationError(e.to_string())
-                    })?;
-                    // Supra may return result directly as array, or wrapped in {"result": [...]}
-                    if let Some(result) = json.get("result") {
-                        return Ok(result.clone());
-                    }
-                    // If top-level is already an array, return it directly
-                    if json.is_array() {
-                        return Ok(json);
-                    }
-                    // Single value response (some view functions return a scalar)
-                    return Ok(json);
-                }
-                Ok(resp) if resp.status().is_server_error() => {
-                    last_error = Some(ChainError::NetworkError(format!(
-                        "server error: {}",
-                        resp.status()
-                    )));
-                    continue;
-                }
                 Ok(resp) => {
-                    let text = resp.text().await.unwrap_or_default();
-                    // Try parsing as JSON anyway (malformed but parseable)
-                    if serde_json::from_str::<Value>(&text).is_err() {
-                        return Err(ChainError::DeserializationError(
-                            format!("not valid JSON: {}", &text[..text.len().min(100)]),
-                        ));
+                    // Check rate limiting before consuming body
+                    if let Err(e) = Self::check_rate_limit(&resp) {
+                        last_error = Some(e);
+                        continue;
                     }
-                    return Err(ChainError::DeserializationError(text));
+
+                    if resp.status().is_success() {
+                        let json: Value = resp.json().await.map_err(|e| {
+                            ChainError::DeserializationError(e.to_string())
+                        })?;
+                        // Supra may return result directly as array, or wrapped in {"result": [...]}
+                        if let Some(result) = json.get("result") {
+                            return Ok(result.clone());
+                        }
+                        // If top-level is already an array, return it directly
+                        if json.is_array() {
+                            return Ok(json);
+                        }
+                        // Single value response (some view functions return a scalar)
+                        return Ok(json);
+                    } else if resp.status().is_server_error() {
+                        last_error = Some(ChainError::NetworkError(format!(
+                            "server error: {}",
+                            resp.status()
+                        )));
+                        continue;
+                    } else {
+                        let text = resp.text().await.unwrap_or_default();
+                        if serde_json::from_str::<Value>(&text).is_err() {
+                            return Err(ChainError::DeserializationError(
+                                format!("not valid JSON: {}", &text[..text.len().min(100)]),
+                            ));
+                        }
+                        return Err(ChainError::DeserializationError(text));
+                    }
                 }
                 Err(e) => {
                     last_error = Some(ChainError::NetworkError(e.to_string()));
@@ -180,6 +211,8 @@ impl SupraClient {
 
         let resp = self.http.get(&url).send().await
             .map_err(|e| ChainError::NetworkError(e.to_string()))?;
+
+        Self::check_rate_limit(&resp)?;
 
         let json: Value = resp.json().await
             .map_err(|e| ChainError::DeserializationError(e.to_string()))?;
@@ -429,6 +462,8 @@ impl SupraClient {
 
         let resp = self.http.get(&url).send().await
             .map_err(|e| ChainError::NetworkError(e.to_string()))?;
+
+        Self::check_rate_limit(&resp)?;
 
         let json: Value = resp.json().await
             .map_err(|e| ChainError::DeserializationError(e.to_string()))?;

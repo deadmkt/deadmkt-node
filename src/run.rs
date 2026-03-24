@@ -926,7 +926,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let mut last_phase = phase;
     let mut last_batch_id = batch_id;
     let mut last_new_block_time = std::time::Instant::now();
-    let stale_warn_secs = 60; // warn after 60s of no new blocks
+    // Stall detection moved to poller task (SP3)
 
     // N9: Spawn dedicated chain poller task
     let (block_tx, mut block_rx) = tokio::sync::watch::channel(ledger.block_height);
@@ -936,12 +936,85 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
             config.contracts.settlement.clone(),
         );
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_millis(200));
+            let base_interval = Duration::from_millis(200);
+            let mut backoff = Duration::ZERO;
+            let max_backoff = Duration::from_secs(30);
+            let mut consecutive_errors: u32 = 0;
+            let mut last_error_log = std::time::Instant::now();
+
+            // SP3: Stall detection
+            let mut last_new_block: u64 = 0;
+            let mut stall_backoff = Duration::ZERO;
+            let max_stall_backoff = Duration::from_secs(300);
+            let mut stall_logged = false;
+
             loop {
-                tick.tick().await;
+                let sleep_dur = base_interval + backoff + stall_backoff;
+                tokio::time::sleep(sleep_dur).await;
+
                 match poller_client.get_ledger_info().await {
-                    Ok(l) => { let _ = block_tx.send(l.block_height); }
-                    Err(e) => { eprintln!("[chain-poller] error: {}", e); }
+                    Ok(l) => {
+                        if consecutive_errors > 0 {
+                            eprintln!(
+                                "[chain-poller] recovered after {} errors, resuming normal polling",
+                                consecutive_errors
+                            );
+                            consecutive_errors = 0;
+                            backoff = Duration::ZERO;
+                        }
+
+                        if l.block_height > last_new_block {
+                            if stall_logged {
+                                eprintln!(
+                                    "[chain-poller] blocks resumed at {} (was stalled at {})",
+                                    l.block_height, last_new_block
+                                );
+                                stall_logged = false;
+                            }
+                            last_new_block = l.block_height;
+                            stall_backoff = Duration::ZERO;
+                        } else {
+                            if stall_backoff < max_stall_backoff {
+                                stall_backoff = if stall_backoff.is_zero() {
+                                    Duration::from_secs(1)
+                                } else {
+                                    (stall_backoff * 2).min(max_stall_backoff)
+                                };
+                            }
+                            if !stall_logged && stall_backoff >= Duration::from_secs(30) {
+                                eprintln!(
+                                    "[chain-poller] testnet stall detected at block {}, backing off",
+                                    last_new_block
+                                );
+                                stall_logged = true;
+                            }
+                        }
+
+                        let _ = block_tx.send(l.block_height);
+                    }
+                    Err(e) => {
+                        consecutive_errors += 1;
+                        backoff = Duration::from_secs(
+                            (1u64 << consecutive_errors.min(5)).min(30)
+                        );
+
+                        let now = std::time::Instant::now();
+                        let should_log = consecutive_errors == 1
+                            || now.duration_since(last_error_log) >= backoff;
+
+                        if should_log {
+                            let label = if e.is_rate_limited() {
+                                "rate limited"
+                            } else {
+                                "error"
+                            };
+                            eprintln!(
+                                "[chain-poller] {} (#{}, next retry in {}s): {}",
+                                label, consecutive_errors, backoff.as_secs(), e
+                            );
+                            last_error_log = now;
+                        }
+                    }
                 }
             }
         });
@@ -990,11 +1063,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                 }
 
                 if block <= last_block {
-                    let stale_secs = last_new_block_time.elapsed().as_secs();
-                    if stale_secs > 0 && stale_secs % stale_warn_secs == 0 {
-                        eprintln!("[poll] WARNING: no new blocks for {}s (stuck at {})", stale_secs, last_block);
-                    }
-                    continue; // no new blocks
+                    continue; // Stall detection handled in poller task (SP3)
                 }
                 last_new_block_time = std::time::Instant::now();
 
