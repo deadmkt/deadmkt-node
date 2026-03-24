@@ -620,21 +620,16 @@ pub async fn auto_mint_and_deposit(
                 if !claim.success {
                     return Err(SetupError::ChainError(format!("Claim failed: {}", claim.vm_status)));
                 }
-                io.print("    Claimed! Waiting for tokens...\n");
-                // Poll wallet until tokens appear
+                io.print("    Claimed! Checking escrow...\n");
+                // C1: claim_mint deposits directly to escrow — check escrow, not wallet
                 for poll in 1..=30 {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    let e = chain.get_fa_balance(&emm_meta).await.unwrap_or(0);
-                    let k = chain.get_fa_balance(&kay_meta).await.unwrap_or(0);
-                    let t = chain.get_fa_balance(&tee_meta).await.unwrap_or(0);
+                    let e = chain.get_escrow_balance(nft_id, &emm_meta).await.unwrap_or(0);
+                    let k = chain.get_escrow_balance(nft_id, &kay_meta).await.unwrap_or(0);
+                    let t = chain.get_escrow_balance(nft_id, &tee_meta).await.unwrap_or(0);
                     if e > 0 && k > 0 && t > 0 {
-                        io.print(&format!("    Tokens arrived: EMM={:.5}, KAY={:.5}, TEE={:.5}\n",
+                        io.print(&format!("    Escrow funded: EMM={:.5}, KAY={:.5}, TEE={:.5}\n",
                             e as f64 / 100_000.0, k as f64 / 100_000.0, t as f64 / 100_000.0));
-                        io.print("    Depositing to escrow...\n");
-                        chain.submit_deposit(&emm_meta, e).await?;
-                        chain.submit_deposit(&kay_meta, k).await?;
-                        chain.submit_deposit(&tee_meta, t).await?;
-                        io.print("    Deposited!\n");
                         return Ok(vec![
                             TokenBalance { symbol: "EMM".into(), amount: e, metadata_address: emm_meta },
                             TokenBalance { symbol: "KAY".into(), amount: k, metadata_address: kay_meta },
@@ -642,11 +637,11 @@ pub async fn auto_mint_and_deposit(
                         ]);
                     }
                     if poll % 5 == 0 {
-                        io.print(&format!("    Waiting for tokens... ({}/30)\n", poll));
+                        io.print(&format!("    Waiting for escrow... ({}/30)\n", poll));
                     }
                 }
                 return Err(SetupError::ChainError(
-                    "Claim succeeded but tokens not visible after 90s. Re-run setup.".into(),
+                    "Claim succeeded but escrow not funded after 90s. Re-run setup.".into(),
                 ));
             }
         }
@@ -705,30 +700,16 @@ pub async fn auto_mint_and_deposit(
             let claim_result = chain.submit_claim_mint().await?;
             if claim_result.success {
                 io.print("    Tokens claimed!\n");
-                // Poll wallet until tokens appear
-                io.print("    Waiting for tokens to appear in wallet...\n");
+                // C1: claim_mint deposits directly to escrow — check escrow, not wallet
+                io.print("    Waiting for escrow to be funded...\n");
                 for poll in 1..=30 {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    let e = chain.get_fa_balance(&emm_meta).await.unwrap_or(0);
-                    let k = chain.get_fa_balance(&kay_meta).await.unwrap_or(0);
-                    let t = chain.get_fa_balance(&tee_meta).await.unwrap_or(0);
+                    let e = chain.get_escrow_balance(nft_id, &emm_meta).await.unwrap_or(0);
+                    let k = chain.get_escrow_balance(nft_id, &kay_meta).await.unwrap_or(0);
+                    let t = chain.get_escrow_balance(nft_id, &tee_meta).await.unwrap_or(0);
                     if e > 0 && k > 0 && t > 0 {
-                        io.print(&format!("    Tokens arrived: EMM={:.5}, KAY={:.5}, TEE={:.5}\n",
+                        io.print(&format!("    Escrow funded: EMM={:.5}, KAY={:.5}, TEE={:.5}\n",
                             e as f64 / 100_000.0, k as f64 / 100_000.0, t as f64 / 100_000.0));
-                        io.print("    Depositing to escrow...\n");
-                        let dep1 = chain.submit_deposit(&emm_meta, e).await?;
-                        if !dep1.success {
-                            return Err(SetupError::ChainError(format!("EMM deposit failed: {}", dep1.vm_status)));
-                        }
-                        let dep2 = chain.submit_deposit(&kay_meta, k).await?;
-                        if !dep2.success {
-                            return Err(SetupError::ChainError(format!("KAY deposit failed: {}", dep2.vm_status)));
-                        }
-                        let dep3 = chain.submit_deposit(&tee_meta, t).await?;
-                        if !dep3.success {
-                            return Err(SetupError::ChainError(format!("TEE deposit failed: {}", dep3.vm_status)));
-                        }
-                        io.print("    Deposited!\n");
                         return Ok(vec![
                             TokenBalance { symbol: "EMM".into(), amount: e, metadata_address: emm_meta },
                             TokenBalance { symbol: "KAY".into(), amount: k, metadata_address: kay_meta },
@@ -736,11 +717,11 @@ pub async fn auto_mint_and_deposit(
                         ]);
                     }
                     if poll % 5 == 0 {
-                        io.print(&format!("    Waiting for tokens... ({}/30)\n", poll));
+                        io.print(&format!("    Waiting for escrow... ({}/30)\n", poll));
                     }
                 }
                 return Err(SetupError::ChainError(
-                    "Claim succeeded but tokens not visible after 90s. Re-run setup.".into(),
+                    "Claim succeeded but escrow not funded after 90s. Re-run setup.".into(),
                 ));
             }
             let status = &claim_result.vm_status;
