@@ -692,9 +692,13 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let (gossip_inbound_tx, mut gossip_inbound_rx) = tokio::sync::mpsc::channel::<GossipMessage>(8192);
     let gossip_peer_count = Arc::new(AtomicU64::new(0));
     let gossip_peer_count_writer = gossip_peer_count.clone();
+    let bootstrap_peers_for_task: Vec<String> = config.bootstrap_peers.clone();
 
     let _gossip_task = tokio::spawn(async move {
         let mut drop_count: u64 = 0;
+        let mut redial_interval = tokio::time::interval(Duration::from_secs(60));
+        redial_interval.tick().await; // skip first immediate tick
+
         loop {
             tokio::select! {
                 event = gossip_node.swarm_mut().select_next_some() => {
@@ -744,6 +748,36 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                         SwarmCommand::UnsubscribePool(pool_id) => {
                             if let Err(e) = gossip_node.unsubscribe_pool(pool_id) {
                                 eprintln!("[gossip-task] unsubscribe error for pool {}: {}", pool_id, e);
+                            }
+                        }
+                    }
+                }
+                // SP5: Periodic peer rediscovery
+                _ = redial_interval.tick() => {
+                    let peer_count = gossip_peer_count_writer.load(Ordering::Relaxed);
+                    if peer_count == 0 {
+                        eprintln!("[gossip] no peers connected, attempting redial...");
+                        for peer_addr in &bootstrap_peers_for_task {
+                            let parts: Vec<&str> = peer_addr.split(':').collect();
+                            if parts.len() == 2 {
+                                match std::net::ToSocketAddrs::to_socket_addrs(
+                                    &format!("{}:{}", parts[0], parts[1])
+                                ) {
+                                    Ok(mut addrs) => {
+                                        if let Some(sock) = addrs.next() {
+                                            let multi: libp2p::Multiaddr = format!(
+                                                "/ip4/{}/tcp/{}", sock.ip(), sock.port()
+                                            ).parse().unwrap();
+                                            match gossip_node.dial(multi) {
+                                                Ok(_) => eprintln!("[gossip] redialing {}", peer_addr),
+                                                Err(e) => eprintln!("[gossip] redial failed {}: {}", peer_addr, e),
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[gossip] DNS resolve failed for {}: {}", peer_addr, e);
+                                    }
+                                }
                             }
                         }
                     }
@@ -923,10 +957,18 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     // This is the root cause fix for the commit timeout / WS disconnect loop.
 
     let mut last_block = ledger.block_height;
+    let last_block_shared = Arc::new(AtomicU64::new(ledger.block_height));
+    let last_block_health = last_block_shared.clone();
     let mut last_phase = phase;
     let mut last_batch_id = batch_id;
     let mut last_new_block_time = std::time::Instant::now();
     // Stall detection moved to poller task (SP3)
+
+    // SP8f: Bootstrap mode detection
+    let bootstrap_mode = std::env::var("DEADMKT_NO_STRATEGY").map(|v| v == "1").unwrap_or(false);
+    if bootstrap_mode {
+        println!("  Mode:     bootstrap (no strategy, slow poll, relay-only)");
+    }
 
     // N9: Spawn dedicated chain poller task
     let (block_tx, mut block_rx) = tokio::sync::watch::channel(ledger.block_height);
@@ -935,8 +977,13 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
             config.rpc_urls.clone(),
             config.contracts.settlement.clone(),
         );
+        let poll_base = if bootstrap_mode {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(200)
+        };
         tokio::spawn(async move {
-            let base_interval = Duration::from_millis(200);
+            let base_interval = poll_base;
             let mut backoff = Duration::ZERO;
             let max_backoff = Duration::from_secs(30);
             let mut consecutive_errors: u32 = 0;
@@ -1029,6 +1076,60 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let mut uptime_batches: u64 = 0;
     let mut settle_failed_recent: u64 = 0;
 
+    // SP8d: Health endpoint
+    {
+        let health_peers = gossip_peer_count.clone();
+        let health_block = last_block_health;
+        tokio::spawn(async move {
+            let bind_addr = if std::env::var("DEADMKT_HEALTH_EXTERNAL").is_ok() {
+                "0.0.0.0:9292"
+            } else {
+                "127.0.0.1:9292"
+            };
+            let listener = match tokio::net::TcpListener::bind(bind_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("[health] failed to bind {}: {}", bind_addr, e);
+                    return;
+                }
+            };
+            eprintln!("[health] listening on {}", bind_addr);
+
+            let mut conn_count: u32 = 0;
+            let mut last_reset = std::time::Instant::now();
+
+            loop {
+                match listener.accept().await {
+                    Ok((mut stream, _)) => {
+                        let now_inst = std::time::Instant::now();
+                        if now_inst.duration_since(last_reset) >= Duration::from_secs(1) {
+                            conn_count = 0;
+                            last_reset = now_inst;
+                        }
+                        conn_count += 1;
+                        if conn_count > 10 {
+                            drop(stream);
+                            continue;
+                        }
+
+                        let peers = health_peers.load(Ordering::Relaxed);
+                        let block = health_block.load(Ordering::Relaxed);
+                        let body = format!(
+                            "{{\"status\":\"ok\",\"peers\":{},\"block\":{}}}",
+                            peers, block
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
+                    }
+                    Err(_) => continue,
+                }
+            }
+        });
+    }
+
     loop {
         tokio::select! {
             // ── Graceful shutdown ────────────────────────────────────
@@ -1098,6 +1199,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                         eprintln!("[skip] jumped {} \u{2192} {} ({} batches), skipping to current",
                                   last_batch_id, new_batch_id, new_batch_id - last_batch_id);
                         last_block = block;
+                        last_block_shared.store(block, Ordering::Relaxed);
                         last_phase = new_phase;
                         last_batch_id = new_batch_id;
                         continue;
@@ -1601,6 +1703,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                 drain_strategy_events(&mut orchestrator, &strategy_server).await;
 
                 last_block = block;
+                last_block_shared.store(block, Ordering::Relaxed);
                 last_phase = new_phase;
                 last_batch_id = new_batch_id;
             }

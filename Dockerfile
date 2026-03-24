@@ -22,7 +22,7 @@ LABEL org.opencontainers.image.title="deadmkt-node"
 # Install Python for strategy wrapper
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        python3 python3-pip ca-certificates netcat-openbsd && \
+        python3 python3-pip ca-certificates netcat-openbsd curl && \
     pip3 install --break-system-packages websockets && \
     rm -rf /var/lib/apt/lists/*
 
@@ -41,6 +41,6 @@ RUN chmod +x /opt/deadmkt/entrypoint.sh
 VOLUME /data
 ENV DEADMKT_DATA_DIR=/data
 
-EXPOSE 9090
+EXPOSE 9090 9191 9292
 
 ENTRYPOINT ["/opt/deadmkt/entrypoint.sh"]

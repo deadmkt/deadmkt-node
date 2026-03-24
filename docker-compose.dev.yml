@@ -16,7 +16,13 @@ services:
       - DEADMKT_DIAL_PEERS=deadmkt-node2:9191
       # Override contract address: set CONTRACT_ADDR in .env or shell
       - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
+    restart: always
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9191"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   node2:
     build: .
@@ -35,7 +41,13 @@ services:
       - DEADMKT_DIAL_PEERS=deadmkt-node1:9191
       # Override contract address: set CONTRACT_ADDR in .env or shell
       - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
+    restart: always
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9191"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   node3:
     build: .
@@ -53,7 +65,13 @@ services:
       - DEADMKT_KEYSTORE_PASSWORD=${NODE3_PASSWORD:-testnet789}
       - DEADMKT_DIAL_PEERS=deadmkt-node1:9191,deadmkt-node2:9191
       - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
+    restart: always
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9191"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   node4:
     build: .
@@ -71,7 +89,13 @@ services:
       - DEADMKT_KEYSTORE_PASSWORD=${NODE4_PASSWORD:-testnet101}
       - DEADMKT_DIAL_PEERS=deadmkt-node1:9191,deadmkt-node2:9191
       - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
+    restart: always
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9191"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   node5:
     build: .
@@ -89,7 +113,13 @@ services:
       - DEADMKT_KEYSTORE_PASSWORD=${NODE5_PASSWORD:-testnet202}
       - DEADMKT_DIAL_PEERS=deadmkt-node1:9191,deadmkt-node2:9191
       - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
+    restart: always
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9191"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   node6:
     build: .
@@ -107,7 +137,13 @@ services:
       - DEADMKT_KEYSTORE_PASSWORD=${NODE6_PASSWORD:-testnet303}
       - DEADMKT_DIAL_PEERS=deadmkt-node1:9191,deadmkt-node2:9191
       - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
-    restart: unless-stopped
+    restart: always
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9191"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   node1-data:

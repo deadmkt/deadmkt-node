@@ -81,7 +81,7 @@ impl GossipNode {
             .map_err(|e| GossipError::SwarmError(e.to_string()))?
             .with_behaviour(|_| Ok(gossipsub))
             .map_err(|e| GossipError::SwarmError(e.to_string()))?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(120)))
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
             .build();
 
         let mut node = GossipNode {
