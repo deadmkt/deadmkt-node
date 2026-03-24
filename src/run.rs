@@ -1227,33 +1227,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             my_pool = new_pool;
                         }
 
-                        // Notify strategy of new batch
-                        let (esc_proj, esc_conf) = build_escrow_views(&_tracker, &token_decimals);
-                        let pending_setts: Vec<deadmkt_strategy::PendingSettlementData> = {
-                            let mgr = settlement_mgr.lock().unwrap();
-                            mgr.pending_summary().iter().map(|(h, b, s)| {
-                                deadmkt_strategy::PendingSettlementData {
-                                    match_hash: h.clone(), batch_id: *b, status: s.clone(),
-                                }
-                            }).collect()
-                        };
-                        let peers = gossip_peer_count.load(Ordering::Relaxed);
-                        let health = deadmkt_strategy::NodeHealthData {
-                            gas_status: format!("{:?}", gas_manager.check_status()),
-                            gossip_connected: peers > 0,
-                            gossip_peers: peers,
-                            settle_pending_count: pending_setts.len() as u64,
-                            settle_failed_recent,
-                            uptime_batches,
-                            block_height: block,
-                            timestamp: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs()).unwrap_or(0),
-                        };
-                        let batch_start = StrategyEvent::BatchStart {
-                            data: make_batch_start(new_batch_id, new_pool, &params, num_pools, &esc_proj, &esc_conf, &wallet_balances, &gas_manager.balance_display(), peers, &last_batch_data, pending_setts, Some(health), &mint_state, &circulating, &vault_locks),
-                        };
-                        let _ = strategy_server.send_event(batch_start).await;
+                        // BatchStart sent only in COMMIT phase handler below.
                     }
 
                     // ── Phase handlers ────────────────────────────────
