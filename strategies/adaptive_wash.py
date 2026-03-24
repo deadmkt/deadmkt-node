@@ -35,9 +35,9 @@ PAIRS = [
 BASE_PRICE = Decimal("0.05")
 SPREAD = Decimal("0.003")
 DRIFT_CLAMP = Decimal("0.05")
-ALLOC_PCT = Decimal("0.005")
+ALLOC_PCT = Decimal("0.04")
 MIN_BALANCE = Decimal("1.0")
-MIN_QTY = Decimal("0.00001")
+MIN_QTY = Decimal("1.0")
 LOW_RATIO = Decimal("0.3")         # balance bias trigger
 
 # ── Mint Pricing (from tokens.move) ───────────────────────────────────
