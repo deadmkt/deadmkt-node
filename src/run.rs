@@ -852,11 +852,29 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let batch_bridge = BatchStateBridge::new(epoch.clone(), params.clone(), num_pools, config.nft_id);
     let gossip_bridge = GossipBridge::new();
 
-    // Market configs for matching engine — fetch min_quantity from chain
+    // Fetch global min_trade_quantity from pool_config (DMKT11).
+    // This overrides per-pair min_quantity when higher.
+    let global_min_trade = match chain.view_raw(
+        "pool_config", "get_min_trade_quantity", vec![], vec![],
+    ).await {
+        Ok(r) => {
+            r.get(0)
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0)
+        }
+        Err(e) => {
+            eprintln!("  [market] Failed to fetch global min_trade_quantity: {}, using 0", e);
+            0
+        }
+    };
+    eprintln!("  [market] global min_trade_quantity={}", global_min_trade);
+
+    // Market configs for matching engine — fetch per-pair min_quantity, apply global max
     let mut market_configs = Vec::new();
     for pair in &config.markets {
         let symbol_hex = format!("0x{}", hex::encode(pair.as_bytes()));
-        let min_qty = match chain.view_raw(
+        let per_pair_min = match chain.view_raw(
             "settlement", "get_market_pair", vec![],
             vec![serde_json::json!(symbol_hex)],
         ).await {
@@ -873,11 +891,12 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                 1
             }
         };
+        let effective_min = std::cmp::max(global_min_trade, per_pair_min);
         market_configs.push(MarketConfig {
             symbol: pair.as_bytes().to_vec(),
-            min_quantity: min_qty,
+            min_quantity: effective_min,
         });
-        eprintln!("  [market] {} min_quantity={}", pair, min_qty);
+        eprintln!("  [market] {} min_quantity={} (per_pair={}, global={})", pair, effective_min, per_pair_min, global_min_trade);
     }
 
     let mut orchestrator = Orchestrator::new(
