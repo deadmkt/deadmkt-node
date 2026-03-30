@@ -128,7 +128,7 @@ fn default_rpc_urls(network: &Network) -> Vec<String> {
 /// All modules live under a single deployer address.
 pub fn default_contract_addresses(network: &Network) -> ContractAddresses {
     let addr = match network {
-        Network::Testnet => "0xc4b49db5a93d5cc419b2a2af168b553016e8d509b6aff74d2d5e29f8e7c74e64",
+        Network::Testnet => "0xbe4d78eccce81356eea0aae067ba75d38fd8749225dd0c4837f11c349fedf009",
         Network::Mainnet => "", // TBD at mainnet launch
     };
     ContractAddresses {
