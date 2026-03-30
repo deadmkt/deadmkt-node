@@ -7,22 +7,23 @@ SHA256(batch_id : pair : nft_id : epoch).  No coordination protocol
 needed — nodes independently take opposite sides and produce real
 cross-node trades.
 
-v3 changes (DMKT10):
-- Fixed allocation math: ALLOC_PCT no longer divided by node count.
-  The per-node scaling was causing order quantities to drop below
-  MIN_QTY when balances were moderate, creating a death spiral where
-  depleted nodes couldn't recover. Each node now uses flat 2% alloc.
-- Lowered MIN_QTY from 1.0 to 0.1 (10000 raw = 0.10000 tokens).
-  Allows nodes with small balances to keep trading and recover.
-- Triangle rebalancing uses 4% alloc (double normal) to correct faster.
-- Epoch rotation every 50 batches (was 100) for faster bias cycling.
-- Emergency mode: if any token < 1.0, force-buy it with max available
-  from the healthiest token, skipping all other pairs that batch.
+v3.1 changes:
+- REMOVED per-pair LOW_RATIO override entirely. It was synchronizing
+  all nodes to the same side when system-wide drift created similar
+  balance patterns (e.g. all nodes low EMM relative to KAY), causing
+  complete market freezes with zero matches. Triangle rebalancer +
+  emergency mode handle drift without synchronizing.
+
+v3 changes:
+- Fixed allocation math: flat 2% ALLOC_PCT, not divided by node count.
+- Lowered MIN_QTY from 1.0 to 0.1 for tiny recovery orders.
+- Triangle rebalancing at 4% alloc for faster correction.
+- Epoch rotation every 50 batches for faster bias cycling.
+- Emergency mode: if any token < 1.0, focus all trading on recovery.
 
 v2 changes:
 - Rotating epoch prevents persistent directional bias per NFT ID.
 - Global triangle rebalancing checks all three tokens together.
-- Raised LOW_RATIO from 0.3 to 0.4 for faster per-pair correction.
 
 Mount as strategy.py on every trading node:
   docker run ... -v ~/strategies/adaptive_wash.py:/data/strategy.py ...
@@ -62,7 +63,10 @@ DRIFT_CLAMP = Decimal("0.05")
 ALLOC_PCT = Decimal("0.02")           # flat 2% — NOT divided by node count
 MIN_BALANCE = Decimal("0.1")           # lowered from 1.0
 MIN_QTY = Decimal("0.10000")           # lowered from 1.0 — allows tiny recovery orders
-LOW_RATIO = Decimal("0.4")             # per-pair balance bias trigger
+# Per-pair override REMOVED in v3.1 — it synchronized all nodes to the
+# same side when system-wide drift created similar balance patterns,
+# causing complete market freezes. Triangle rebalancer + emergency mode
+# handle drift correction without synchronizing nodes.
 
 # ── Triangle Rebalancing ──────────────────────────────────────────────
 REBALANCE_THRESHOLD = Decimal("0.6")   # force buy if token < 60% of avg
@@ -105,19 +109,7 @@ def _deterministic_mid(batch_id, pair_name):
     return BASE_PRICE * (1 + drift)
 
 
-def _maybe_override_role(role, pair, escrow):
-    """Override hash role if token balance is dangerously skewed (per-pair)."""
-    base_bal = Decimal(escrow.get(pair["base"], "0"))
-    quote_bal = Decimal(escrow.get(pair["quote"], "0"))
-    total = base_bal + quote_bal
-    if total == 0:
-        return role
-    ratio = base_bal / total
-    if ratio < LOW_RATIO:
-        return "buy"
-    if ratio > (1 - LOW_RATIO):
-        return "sell"
-    return role
+# _maybe_override_role REMOVED in v3.1 — see note above
 
 
 # ── Triangle rebalancing ─────────────────────────────────────────────
@@ -184,7 +176,13 @@ def _calc_mint_amount(gas_balance_str):
     per_token = max_total / 3
     if per_token < MIN_MINT_TOKENS:
         return 0
-    return int(per_token * 100000)
+    raw = int(per_token * 100000)
+    # Round down to nearest 1_000_000 (whole token) to satisfy
+    # E_TOTAL_NOT_DIVISIBLE_BY_10 contract constraint
+    raw = (raw // 1_000_000) * 1_000_000
+    if raw == 0:
+        return 0
+    return raw
 
 
 # ── Order building ────────────────────────────────────────────────────
@@ -268,7 +266,6 @@ def _build_orders(escrow, batch_id, peers_in_pool):
             effective_alloc = REBALANCE_ALLOC
         else:
             role = _role_for(batch_id, pair, _nft_id)
-            role = _maybe_override_role(role, market, escrow)
             effective_alloc = ALLOC_PCT
 
         mid = _deterministic_mid(batch_id, pair)
