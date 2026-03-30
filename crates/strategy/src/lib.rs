@@ -272,7 +272,7 @@ pub struct MarketDeactivatedData {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenActionResultData {
-    pub action: String,     // "mint", "claim_mint", "burn", "lock", "unlock"
+    pub action: String,     // "mint", "claim_mint", "burn_from_escrow", "lock", "unlock"
     pub success: bool,
     pub message: String,    // gas used on success, error message on failure
 }
@@ -522,7 +522,6 @@ pub enum StrategyAction {
     // Token actions (out-of-band, not part of batch cycle)
     Mint { m_amount: u64, k_amount: u64, t_amount: u64 },
     ClaimMint,
-    Burn { amount: u64 },
     BurnFromEscrow { amount: u64 },
     Lock { symbol: String, amount: u64, duration_secs: u64 },
     Unlock { lock_index: u64 },
@@ -535,7 +534,6 @@ impl StrategyAction {
         matches!(self,
             StrategyAction::Mint { .. } |
             StrategyAction::ClaimMint |
-            StrategyAction::Burn { .. } |
             StrategyAction::BurnFromEscrow { .. } |
             StrategyAction::Lock { .. } |
             StrategyAction::Unlock { .. }
@@ -593,12 +591,7 @@ impl StrategyAction {
                 Ok(StrategyAction::Mint { m_amount: m, k_amount: k, t_amount: t })
             }
             "claim_mint" => Ok(StrategyAction::ClaimMint),
-            "burn" => {
-                let amount = json.get("amount").and_then(|v| v.as_u64())
-                    .ok_or_else(|| StrategyError::ParseError("missing 'amount' field".into()))?;
-                Ok(StrategyAction::Burn { amount })
-            }
-            "burn_from_escrow" => {
+            "burn" | "burn_from_escrow" => {
                 let amount = json.get("amount").and_then(|v| v.as_u64())
                     .ok_or_else(|| StrategyError::ParseError("missing 'amount' field".into()))?;
                 Ok(StrategyAction::BurnFromEscrow { amount })
@@ -876,13 +869,13 @@ mod tests {
         assert_eq!(action, StrategyAction::ClaimMint);
     }
 
-    // ── T_STRAT_08d: Burn action parses
+    // ── T_STRAT_08d: Burn action parses (maps to BurnFromEscrow)
 
     #[test]
     fn t_strat_08d_burn_action_from_json() {
         let json = serde_json::json!({"action": "burn", "amount": 10000000});
         let action = StrategyAction::from_json(&json).unwrap();
-        assert_eq!(action, StrategyAction::Burn { amount: 10000000 });
+        assert_eq!(action, StrategyAction::BurnFromEscrow { amount: 10000000 });
     }
 
     // ── T_STRAT_08e: Lock action parses
@@ -928,7 +921,7 @@ mod tests {
         assert!(!StrategyAction::Reveal { reveal_indices: vec![] }.is_token_action());
         assert!(StrategyAction::Mint { m_amount: 1, k_amount: 1, t_amount: 1 }.is_token_action());
         assert!(StrategyAction::ClaimMint.is_token_action());
-        assert!(StrategyAction::Burn { amount: 1 }.is_token_action());
+        assert!(StrategyAction::BurnFromEscrow { amount: 1 }.is_token_action());
         assert!(StrategyAction::Lock { symbol: "EMM".into(), amount: 1, duration_secs: 1 }.is_token_action());
         assert!(StrategyAction::Unlock { lock_index: 0 }.is_token_action());
     }

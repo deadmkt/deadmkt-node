@@ -3,7 +3,7 @@
 // Background task that processes token management actions from the strategy
 // WebSocket. Runs continuously, independent of the batch commit cycle.
 //
-// Actions: Mint, ClaimMint, Burn, Lock, Unlock
+// Actions: Mint, ClaimMint, BurnFromEscrow, Lock, Unlock
 // Each action submits a chain transaction via SupraSetupClient and sends
 // a TokenActionResult event back to the strategy over WebSocket.
 //
@@ -168,25 +168,6 @@ async fn token_worker_loop(
                     Err(e) => {
                         eprintln!("[token_worker] claim ERROR: {}", e);
                         notify(&event_tx, "claim_mint", false, e.to_string()).await;
-                    }
-                }
-            }
-
-            StrategyAction::Burn { amount } => {
-                // DMKT9: Burn action remapped to burn_from_escrow (no wallet intermediary)
-                println!("[token_worker] burn_from_escrow({}) (via burn action)", amount);
-                match client.submit_burn_from_escrow(amount).await {
-                    Ok(r) if r.success => {
-                        println!("[token_worker] burn OK (gas={})", r.gas_used);
-                        notify(&event_tx, "burn", true, format!("gas={}", r.gas_used)).await;
-                    }
-                    Ok(r) => {
-                        eprintln!("[token_worker] burn FAILED: {}", r.vm_status);
-                        notify(&event_tx, "burn", false, r.vm_status).await;
-                    }
-                    Err(e) => {
-                        eprintln!("[token_worker] burn ERROR: {}", e);
-                        notify(&event_tx, "burn", false, e.to_string()).await;
                     }
                 }
             }
