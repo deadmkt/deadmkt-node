@@ -667,22 +667,54 @@ pub async fn auto_mint_and_deposit(
         io.print("  Minting Trippples tokens (first mint ~8 min hold)...\n");
     }
 
+    // Ask which token to weight (creates the initial trading imbalance)
+    io.print("\nWhich token do you want more of? This creates your initial\n");
+    io.print("trading position (you'll trade the surplus for what you need).\n");
+    io.print("  [E]MM  [K]AY  [T]EE  (default: TEE)\n> ");
+    let weight_input = io.read_line()?;
+    let weight_choice = weight_input.trim().to_uppercase();
+    let weighted_index: usize = match weight_choice.as_str() {
+        "E" | "EMM" => 0,
+        "K" | "KAY" => 1,
+        _ => 2, // default TEE
+    };
+    let weight_label = ["EMM", "KAY", "TEE"][weighted_index];
+    io.print(&format!("  Weighting towards {}\n", weight_label));
+
     let available_supra = supra_balance * MINT_SUPRA_FRACTION_PCT / 100;
     let total_base_units = available_supra / SUPRA_PER_TOKEN_UNIT;
-    let each = (total_base_units / 3 / 1_000_000) * 1_000_000;
+    // Round total down to nearest 1_000_000 (divisible by 10 tokens)
+    let total = (total_base_units / 1_000_000) * 1_000_000;
 
-    if each == 0 {
+    if total < 1_000_000 {
         return Err(SetupError::ChainError(
             "Insufficient SUPRA to mint. Fund with more SUPRA and try again.".into(),
         ));
     }
 
-    let tokens_display = each as f64 / 100_000.0;
-    let supra_display = (each * 3 * SUPRA_PER_TOKEN_UNIT) as f64 / 100_000_000.0;
-    io.print(&format!("    Minting {:.5} EMM, {:.5} KAY, {:.5} TEE ({:.8} SUPRA)\n",
-        tokens_display, tokens_display, tokens_display, supra_display));
+    // Compute skewed split: weighted token gets 40%, others get 30% each.
+    // For total=1_000_000 (10 tokens): 300000/300000/400000 (3/3/4 pattern).
+    // Round each to nearest 100_000 (1 token) then adjust remainder.
+    let heavy = (total * 4 / 10 / 100_000) * 100_000;
+    let light = (total * 3 / 10 / 100_000) * 100_000;
+    let remainder = total - heavy - 2 * light;
+    // Add remainder to heavy token (keeps it within ratio)
+    let heavy = heavy + remainder;
 
-    let mint_result = chain.submit_request_mint(each, each, each).await?;
+    let (m_amount, k_amount, t_amount) = match weighted_index {
+        0 => (heavy, light, light),
+        1 => (light, heavy, light),
+        _ => (light, light, heavy),
+    };
+
+    let m_display = m_amount as f64 / 100_000.0;
+    let k_display = k_amount as f64 / 100_000.0;
+    let t_display = t_amount as f64 / 100_000.0;
+    let supra_display = (total * SUPRA_PER_TOKEN_UNIT) as f64 / 100_000_000.0;
+    io.print(&format!("    Minting {:.5} EMM, {:.5} KAY, {:.5} TEE ({:.8} SUPRA)\n",
+        m_display, k_display, t_display, supra_display));
+
+    let mint_result = chain.submit_request_mint(m_amount, k_amount, t_amount).await?;
     if !mint_result.success {
         if mint_result.vm_status.contains("HAS_PENDING_MINT") || mint_result.vm_status.contains("E_HAS_PENDING_MINT") {
             io.print("    Pending mint exists — strategy will claim when ready.\n");
@@ -902,16 +934,13 @@ pub async fn run_wizard(
         funding.tokens.clone()
     };
 
-    // Step 7 (skip for bootstrap — no trading, no profit config needed)
-    let profit = if bootstrap_only {
-        ProfitConfig {
-            base_capital: HashMap::new(),
-            threshold_pct: 0,
-            transfer_mode: "all_excess".into(),
-            transfer_mode_value: None,
-        }
-    } else {
-        prompt_profit_config(io, &tokens)?
+    // Step 7: Profit config removed in DMKT11.
+    // Agent handles profit distribution via burn_to_beneficiary.
+    let profit = ProfitConfig {
+        base_capital: HashMap::new(),
+        threshold_pct: 0,
+        transfer_mode: "all_excess".into(),
+        transfer_mode_value: None,
     };
 
     // Step 8 (generate token silently for bootstrap — node config expects it)
