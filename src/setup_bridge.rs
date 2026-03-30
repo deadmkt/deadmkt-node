@@ -810,7 +810,20 @@ impl ChainClient for SupraSetupClient {
         })
     }
 
-    fn submit_lock_tokens(
+    fn submit_burn_to_beneficiary(
+        &self,
+        amount: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            let args = vec![
+                bcs::to_bytes(&amount)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+            ];
+            self.submit_entry_function("tokens", "burn_to_beneficiary", args).await
+        })
+    }
+
+    fn submit_lock_from_escrow(
         &self,
         symbol: u8,
         amount: u64,
@@ -825,11 +838,11 @@ impl ChainClient for SupraSetupClient {
                 bcs::to_bytes(&duration_secs)
                     .map_err(|e| SetupError::ChainError(e.to_string()))?,
             ];
-            self.submit_entry_function("tokens", "lock_tokens", args).await
+            self.submit_entry_function("tokens", "lock_from_escrow", args).await
         })
     }
 
-    fn submit_unlock_tokens(
+    fn submit_unlock_to_escrow(
         &self,
         lock_index: u64,
     ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
@@ -838,7 +851,26 @@ impl ChainClient for SupraSetupClient {
                 bcs::to_bytes(&lock_index)
                     .map_err(|e| SetupError::ChainError(e.to_string()))?,
             ];
-            self.submit_entry_function("tokens", "unlock_tokens", args).await
+            self.submit_entry_function("tokens", "unlock_to_escrow", args).await
+        })
+    }
+
+    fn submit_donate_dust(
+        &self,
+        recipient_nft_id: u64,
+        symbol: u8,
+        amount: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            let args = vec![
+                bcs::to_bytes(&recipient_nft_id)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+                bcs::to_bytes(&symbol)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+                bcs::to_bytes(&amount)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+            ];
+            self.submit_entry_function("tokens", "donate_dust", args).await
         })
     }
 }

@@ -215,22 +215,41 @@ pub trait ChainClient: Send + Sync {
         Box::pin(async { Err(SetupError::ChainError("submit_burn_from_escrow not implemented".into())) })
     }
 
-    /// Call tokens::lock_tokens(symbol, amount, min_duration_secs).
-    fn submit_lock_tokens(
+    /// Call tokens::burn_to_beneficiary(amount). Burns triples from escrow,
+    /// returns SUPRA to beneficiary. Profit distribution path.
+    fn submit_burn_to_beneficiary(
+        &self,
+        _amount: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async { Err(SetupError::ChainError("submit_burn_to_beneficiary not implemented".into())) })
+    }
+
+    /// Call tokens::lock_from_escrow(symbol, amount, min_duration_secs).
+    fn submit_lock_from_escrow(
         &self,
         _symbol: u8,
         _amount: u64,
         _duration_secs: u64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
-        Box::pin(async { Err(SetupError::ChainError("submit_lock_tokens not implemented".into())) })
+        Box::pin(async { Err(SetupError::ChainError("submit_lock_from_escrow not implemented".into())) })
     }
 
-    /// Call tokens::unlock_tokens(lock_index).
-    fn submit_unlock_tokens(
+    /// Call tokens::unlock_to_escrow(lock_index).
+    fn submit_unlock_to_escrow(
         &self,
         _lock_index: u64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
-        Box::pin(async { Err(SetupError::ChainError("submit_unlock_tokens not implemented".into())) })
+        Box::pin(async { Err(SetupError::ChainError("submit_unlock_to_escrow not implemented".into())) })
+    }
+
+    /// Call tokens::donate_dust(recipient_nft_id, symbol, amount).
+    fn submit_donate_dust(
+        &self,
+        _recipient_nft_id: u64,
+        _symbol: u8,
+        _amount: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async { Err(SetupError::ChainError("submit_donate_dust not implemented".into())) })
     }
 }
 
@@ -1194,13 +1213,13 @@ mod tests {
         }
 
 
-        fn submit_lock_tokens(&self, _symbol: u8, _amount: u64, _duration: u64)
+        fn submit_lock_from_escrow(&self, _symbol: u8, _amount: u64, _duration: u64)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>
         {
             Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 350, vm_status: "ok".into() }) })
         }
 
-        fn submit_unlock_tokens(&self, _lock_index: u64)
+        fn submit_unlock_to_escrow(&self, _lock_index: u64)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>
         {
             Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 300, vm_status: "ok".into() }) })

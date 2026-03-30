@@ -523,8 +523,10 @@ pub enum StrategyAction {
     Mint { m_amount: u64, k_amount: u64, t_amount: u64 },
     ClaimMint,
     BurnFromEscrow { amount: u64 },
+    BurnToBeneficiary { amount: u64 },
     Lock { symbol: String, amount: u64, duration_secs: u64 },
     Unlock { lock_index: u64 },
+    DonateDust { recipient_nft_id: u64, symbol: String, amount: u64 },
 }
 
 impl StrategyAction {
@@ -535,8 +537,10 @@ impl StrategyAction {
             StrategyAction::Mint { .. } |
             StrategyAction::ClaimMint |
             StrategyAction::BurnFromEscrow { .. } |
+            StrategyAction::BurnToBeneficiary { .. } |
             StrategyAction::Lock { .. } |
-            StrategyAction::Unlock { .. }
+            StrategyAction::Unlock { .. } |
+            StrategyAction::DonateDust { .. }
         )
     }
 
@@ -611,6 +615,22 @@ impl StrategyAction {
                 let index = json.get("index").and_then(|v| v.as_u64())
                     .ok_or_else(|| StrategyError::ParseError("missing 'index' field".into()))?;
                 Ok(StrategyAction::Unlock { lock_index: index })
+            }
+            "burn_to_beneficiary" => {
+                let amount = json.get("amount").and_then(|v| v.as_u64())
+                    .ok_or_else(|| StrategyError::ParseError("missing 'amount' field".into()))?;
+                Ok(StrategyAction::BurnToBeneficiary { amount })
+            }
+            "donate_dust" => {
+                let nft_id = json.get("recipient_nft_id").and_then(|v| v.as_u64())
+                    .ok_or_else(|| StrategyError::ParseError("missing 'recipient_nft_id' field".into()))?;
+                let symbol = json.get("symbol").and_then(|v| v.as_str())
+                    .ok_or_else(|| StrategyError::ParseError("missing 'symbol' field".into()))?;
+                let amount = json.get("amount").and_then(|v| v.as_u64())
+                    .ok_or_else(|| StrategyError::ParseError("missing 'amount' field".into()))?;
+                Ok(StrategyAction::DonateDust {
+                    recipient_nft_id: nft_id, symbol: symbol.to_string(), amount,
+                })
             }
             other => Err(StrategyError::ParseError(format!("unknown action: {}", other))),
         }
@@ -922,8 +942,10 @@ mod tests {
         assert!(StrategyAction::Mint { m_amount: 1, k_amount: 1, t_amount: 1 }.is_token_action());
         assert!(StrategyAction::ClaimMint.is_token_action());
         assert!(StrategyAction::BurnFromEscrow { amount: 1 }.is_token_action());
+        assert!(StrategyAction::BurnToBeneficiary { amount: 1 }.is_token_action());
         assert!(StrategyAction::Lock { symbol: "EMM".into(), amount: 1, duration_secs: 1 }.is_token_action());
         assert!(StrategyAction::Unlock { lock_index: 0 }.is_token_action());
+        assert!(StrategyAction::DonateDust { recipient_nft_id: 1, symbol: "EMM".into(), amount: 1 }.is_token_action());
     }
 
     // ── T_STRAT_09: validate_auth correct token

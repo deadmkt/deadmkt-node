@@ -3,12 +3,11 @@
 // Background task that processes token management actions from the strategy
 // WebSocket. Runs continuously, independent of the batch commit cycle.
 //
-// Actions: Mint, ClaimMint, BurnFromEscrow, Lock, Unlock
-// Each action submits a chain transaction via SupraSetupClient and sends
-// a TokenActionResult event back to the strategy over WebSocket.
+// Actions: Mint, ClaimMint, BurnFromEscrow, BurnToBeneficiary, Lock, Unlock, DonateDust
 //
-// B5_9.1: After ClaimMint succeeds, auto-deposit all wallet tokens into
-// escrow. This closes the mint→trade loop without needing the setup wizard.
+// DMKT11: Auto-deposit removed. Tokens never leave escrow to wallet.
+// claim_mint deposits directly to escrow (C1). lock/unlock operate
+// escrow<->vault directly. burn operates escrow->burn directly.
 
 use deadmkt_setup::ChainClient;
 use deadmkt_strategy::{StrategyAction, StrategyEvent, TokenActionResultData};
@@ -16,13 +15,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Spawn a background tokio task that processes token actions.
-///
-/// Reads `StrategyAction`s from `rx` (only token actions arrive here —
-/// the strategy server routes them to a separate channel).
-///
-/// Uses `client` (which implements `ChainClient`) to submit transactions.
-/// Sends `TokenActionResult` events back via `event_tx` so the strategy
-/// knows whether its action succeeded or failed.
 pub fn spawn_token_worker(
     client: Arc<dyn ChainClient>,
     rx: mpsc::Receiver<StrategyAction>,
@@ -44,68 +36,6 @@ async fn notify(tx: &mpsc::Sender<StrategyEvent>, action: &str, success: bool, m
     let _ = tx.send(event).await;
 }
 
-/// Token symbol indices: EMM=0, KAY=1, TEE=2
-const TOKEN_SYMBOLS: [(u8, &str); 3] = [(0, "EMM"), (1, "KAY"), (2, "TEE")];
-
-/// After a successful claim_mint, check wallet balances and deposit any
-/// tokens into escrow. This reactivates inactive NFTs (deposit updates
-/// last_activity_at on-chain) and makes tokens available for trading.
-///
-/// Called while holding tx_lock, so sequence numbers won't collide with
-/// settlements or heartbeats.
-async fn auto_deposit_wallet_to_escrow(
-    client: &Arc<dyn ChainClient>,
-    event_tx: &mpsc::Sender<StrategyEvent>,
-) {
-    println!("[token_worker] auto-deposit: checking wallet balances...");
-
-    for (sym_id, sym_name) in &TOKEN_SYMBOLS {
-        // 1. Resolve metadata address for this token
-        let metadata_addr = match client.get_trippples_metadata(*sym_id).await {
-            Ok(addr) => addr,
-            Err(e) => {
-                eprintln!("[token_worker] auto-deposit: failed to get {} metadata: {}", sym_name, e);
-                continue;
-            }
-        };
-
-        // 2. Check wallet balance
-        let balance = match client.get_fa_balance(&metadata_addr).await {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("[token_worker] auto-deposit: failed to get {} balance: {}", sym_name, e);
-                continue;
-            }
-        };
-
-        if balance == 0 {
-            println!("[token_worker] auto-deposit: {} wallet=0, skip", sym_name);
-            continue;
-        }
-
-        // 3. Deposit entire wallet balance into escrow
-        println!("[token_worker] auto-deposit: {} wallet={}, depositing...", sym_name, balance);
-        match client.submit_deposit(&metadata_addr, balance).await {
-            Ok(r) if r.success => {
-                println!("[token_worker] auto-deposit: {} OK — {} deposited (gas={})",
-                    sym_name, balance, r.gas_used);
-                notify(event_tx, "auto_deposit", true,
-                    format!("{}={} deposited", sym_name, balance)).await;
-            }
-            Ok(r) => {
-                eprintln!("[token_worker] auto-deposit: {} FAILED: {}", sym_name, r.vm_status);
-                notify(event_tx, "auto_deposit", false,
-                    format!("{} deposit failed: {}", sym_name, r.vm_status)).await;
-            }
-            Err(e) => {
-                eprintln!("[token_worker] auto-deposit: {} ERROR: {}", sym_name, e);
-                notify(event_tx, "auto_deposit", false,
-                    format!("{} deposit error: {}", sym_name, e)).await;
-            }
-        }
-    }
-}
-
 async fn token_worker_loop(
     client: Arc<dyn ChainClient>,
     mut rx: mpsc::Receiver<StrategyAction>,
@@ -113,17 +43,6 @@ async fn token_worker_loop(
     tx_lock: Arc<tokio::sync::Mutex<()>>,
 ) {
     println!("[token_worker] started — listening for token actions");
-
-    // ── N11: Startup wallet sweep ──
-    // On startup, sweep any tokens sitting in the trustee wallet into escrow.
-    // Handles legacy state from DMKT8 or earlier versions where claim_mint
-    // left tokens in the wallet. Once C1 (atomic claim_mint→deposit) is
-    // deployed, this only triggers for migrating old state.
-    {
-        let _guard = tx_lock.lock().await;
-        println!("[token_worker] startup: sweeping wallet → escrow");
-        auto_deposit_wallet_to_escrow(&client, &event_tx).await;
-    }
 
     while let Some(action) = rx.recv().await {
         // Acquire tx lock to prevent sequence number collisions
@@ -152,14 +71,9 @@ async fn token_worker_loop(
                 println!("[token_worker] claim_mint");
                 match client.submit_claim_mint().await {
                     Ok(r) if r.success => {
+                        // C1: claim_mint deposits directly to escrow. No auto-deposit needed.
                         println!("[token_worker] claim OK (gas={})", r.gas_used);
                         notify(&event_tx, "claim_mint", true, format!("gas={}", r.gas_used)).await;
-
-                        // ── B5_9.1: Auto-deposit claimed tokens into escrow ──
-                        // Tokens land in the trustee wallet after claim_mint.
-                        // Deposit them into escrow so they're available for trading
-                        // and to reactivate the NFT (deposit updates last_activity_at).
-                        auto_deposit_wallet_to_escrow(&client, &event_tx).await;
                     }
                     Ok(r) => {
                         eprintln!("[token_worker] claim FAILED: {}", r.vm_status);
@@ -190,8 +104,26 @@ async fn token_worker_loop(
                 }
             }
 
+            StrategyAction::BurnToBeneficiary { amount } => {
+                println!("[token_worker] burn_to_beneficiary({})", amount);
+                match client.submit_burn_to_beneficiary(amount).await {
+                    Ok(r) if r.success => {
+                        println!("[token_worker] burn_to_beneficiary OK (gas={})", r.gas_used);
+                        notify(&event_tx, "burn_to_beneficiary", true, format!("gas={}", r.gas_used)).await;
+                    }
+                    Ok(r) => {
+                        eprintln!("[token_worker] burn_to_beneficiary FAILED: {}", r.vm_status);
+                        notify(&event_tx, "burn_to_beneficiary", false, r.vm_status).await;
+                    }
+                    Err(e) => {
+                        eprintln!("[token_worker] burn_to_beneficiary ERROR: {}", e);
+                        notify(&event_tx, "burn_to_beneficiary", false, e.to_string()).await;
+                    }
+                }
+            }
+
             StrategyAction::Lock { symbol, amount, duration_secs } => {
-                println!("[token_worker] lock_tokens({}, {}, {}s)", symbol, amount, duration_secs);
+                println!("[token_worker] lock_from_escrow({}, {}, {}s)", symbol, amount, duration_secs);
                 let sym_id = match symbol.as_str() {
                     "EMM" => 0u8,
                     "KAY" => 1u8,
@@ -202,7 +134,7 @@ async fn token_worker_loop(
                         continue;
                     }
                 };
-                match client.submit_lock_tokens(sym_id, amount, duration_secs).await {
+                match client.submit_lock_from_escrow(sym_id, amount, duration_secs).await {
                     Ok(r) if r.success => {
                         println!("[token_worker] lock OK (gas={})", r.gas_used);
                         notify(&event_tx, "lock", true, format!("gas={}", r.gas_used)).await;
@@ -219,8 +151,8 @@ async fn token_worker_loop(
             }
 
             StrategyAction::Unlock { lock_index } => {
-                println!("[token_worker] unlock_tokens({})", lock_index);
-                match client.submit_unlock_tokens(lock_index).await {
+                println!("[token_worker] unlock_to_escrow({})", lock_index);
+                match client.submit_unlock_to_escrow(lock_index).await {
                     Ok(r) if r.success => {
                         println!("[token_worker] unlock OK (gas={})", r.gas_used);
                         notify(&event_tx, "unlock", true, format!("gas={}", r.gas_used)).await;
@@ -232,6 +164,34 @@ async fn token_worker_loop(
                     Err(e) => {
                         eprintln!("[token_worker] unlock ERROR: {}", e);
                         notify(&event_tx, "unlock", false, e.to_string()).await;
+                    }
+                }
+            }
+
+            StrategyAction::DonateDust { recipient_nft_id, symbol, amount } => {
+                println!("[token_worker] donate_dust(nft={}, {}, {})", recipient_nft_id, symbol, amount);
+                let sym_id = match symbol.as_str() {
+                    "EMM" => 0u8,
+                    "KAY" => 1u8,
+                    "TEE" => 2u8,
+                    other => {
+                        eprintln!("[token_worker] unknown symbol: {}", other);
+                        notify(&event_tx, "donate_dust", false, format!("unknown symbol: {}", other)).await;
+                        continue;
+                    }
+                };
+                match client.submit_donate_dust(recipient_nft_id, sym_id, amount).await {
+                    Ok(r) if r.success => {
+                        println!("[token_worker] donate_dust OK (gas={})", r.gas_used);
+                        notify(&event_tx, "donate_dust", true, format!("gas={}", r.gas_used)).await;
+                    }
+                    Ok(r) => {
+                        eprintln!("[token_worker] donate_dust FAILED: {}", r.vm_status);
+                        notify(&event_tx, "donate_dust", false, r.vm_status).await;
+                    }
+                    Err(e) => {
+                        eprintln!("[token_worker] donate_dust ERROR: {}", e);
+                        notify(&event_tx, "donate_dust", false, e.to_string()).await;
                     }
                 }
             }
