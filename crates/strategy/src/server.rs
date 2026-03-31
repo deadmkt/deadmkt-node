@@ -305,6 +305,17 @@ async fn handle_connection(
 
     let mut event_rx_guard = event_rx.lock().await;
 
+    // Drain stale events accumulated while no strategy was connected.
+    // Without this, backlogged settlements and commit-timeout disconnects
+    // flood the new client and cause immediate WS close.
+    let mut stale_count = 0;
+    while event_rx_guard.try_recv().is_ok() {
+        stale_count += 1;
+    }
+    if stale_count > 0 {
+        println!("[strategy] cleared {} stale events on connect", stale_count);
+    }
+
     loop {
         tokio::select! {
             // Events from orchestrator → WS client
@@ -315,10 +326,15 @@ async fn handle_connection(
                         if ws_sink.send(Message::Text(json)).await.is_err() {
                             break;
                         }
-                        // If disconnected event, close after sending
+                        // If hard-disconnect event (not commit timeout), close
                         if evt.event_name() == "disconnected" {
-                            let _ = ws_sink.close().await;
-                            break;
+                            if let StrategyEvent::Disconnected { ref reason } = evt {
+                                if reason != "commit timeout" {
+                                    let _ = ws_sink.close().await;
+                                    break;
+                                }
+                                // commit timeout is informational — don't kill the WS
+                            }
                         }
                     }
                     None => break, // event channel closed
