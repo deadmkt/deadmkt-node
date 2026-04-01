@@ -568,6 +568,21 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let mut gossip_node = GossipNode::new(gossip_keypair)?;
     gossip_node.listen_on_port(config.gossip_port)?;
 
+    // If GOSSIP_PORT env is set and differs from config, advertise the external
+    // address. This handles Docker port mapping (e.g. 9193->9191) where the
+    // container listens on 9191 but peers must connect to 9193.
+    if let Ok(ext_port_str) = std::env::var("GOSSIP_PORT") {
+        if let Ok(ext_port) = ext_port_str.parse::<u16>() {
+            if ext_port != config.gossip_port {
+                let ext_addr: libp2p::Multiaddr =
+                    format!("/ip4/0.0.0.0/tcp/{}", ext_port).parse().expect("valid multiaddr");
+                gossip_node.add_external_address(ext_addr);
+                eprintln!("  [gossip] advertising external port {} (container listens on {})",
+                    ext_port, config.gossip_port);
+            }
+        }
+    }
+
     // Subscribe to our initial pool
     let mut num_pools = fetch_num_pools(&pool_config_client, &config.contracts.pool_config).await
         .unwrap_or(1);

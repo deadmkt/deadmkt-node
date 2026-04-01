@@ -119,6 +119,14 @@ impl GossipNode {
         Ok(())
     }
 
+    /// Advertise an external address to peers. Use when the node is behind
+    /// NAT or Docker port mapping and the listen address is not reachable
+    /// from outside. Only call when the external port differs from the
+    /// internal listen port.
+    pub fn add_external_address(&mut self, addr: Multiaddr) {
+        self.swarm.add_external_address(addr);
+    }
+
     pub fn dial(&mut self, addr: Multiaddr) -> Result<(), GossipError> {
         self.swarm
             .dial(addr)
