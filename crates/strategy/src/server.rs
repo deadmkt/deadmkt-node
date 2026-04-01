@@ -316,8 +316,19 @@ async fn handle_connection(
         println!("[strategy] cleared {} stale events on connect", stale_count);
     }
 
+    // Server-side ping keepalive — keeps connection alive through Docker
+    // Desktop proxy, NAT, cloud load balancers, etc.
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(15));
+    ping_interval.tick().await; // consume the immediate first tick
+
     loop {
         tokio::select! {
+            // Keepalive ping every 15s
+            _ = ping_interval.tick() => {
+                if ws_sink.send(Message::Ping(vec![])).await.is_err() {
+                    break;
+                }
+            }
             // Events from orchestrator → WS client
             event = event_rx_guard.recv() => {
                 match event {
