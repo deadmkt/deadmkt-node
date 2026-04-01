@@ -1483,7 +1483,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                         .map(|d| d.as_secs()).unwrap_or(0),
                                 };
                                 let _ = strategy_server.send_event(StrategyEvent::BatchStart {
-                                    data: make_batch_start(new_batch_id, pool_id, &params, num_pools, &esc_proj2, &esc_conf2, &wallet_balances, &gas_manager.balance_display(), peers2, &last_batch_data, pending_setts2, Some(health2), &mint_state, &circulating, &vault_locks),
+                                    data: make_batch_start(new_batch_id, pool_id, &params, num_pools, &esc_proj2, &esc_conf2, &wallet_balances, &gas_manager.balance_display(), peers2, &last_batch_data, pending_setts2, Some(health2), &mint_state, &circulating, &vault_locks, global_min_trade),
                                 }).await;
 
                                 match strategy_server.receive_action_with_timeout(
@@ -2058,6 +2058,7 @@ fn make_batch_start(
     mint_state: &deadmkt_strategy::MintStateData,
     circulating: &HashMap<String, String>,
     vault_locks: &[deadmkt_strategy::VaultLockData],
+    min_trade_quantity: u64,
 ) -> deadmkt_strategy::BatchStartData {
     deadmkt_strategy::BatchStartData {
         batch_id,
@@ -2078,6 +2079,7 @@ fn make_batch_start(
         circulating: circulating.clone(),
         vault_locks: vault_locks.to_vec(),
         node_health,
+        min_trade_quantity: min_trade_quantity.to_string(),
     }
 }
 

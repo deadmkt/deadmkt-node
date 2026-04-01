@@ -623,6 +623,7 @@ mod tests {
                     circulating: HashMap::new(),
                     vault_locks: vec![],
                     node_health: None,
+                    min_trade_quantity: "100000".to_string(),
                 },
             })
             .await

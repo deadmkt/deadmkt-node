@@ -34,6 +34,7 @@ async fn main() {
             circulating: HashMap::new(),
             vault_locks: vec![],
             node_health: None,
+            min_trade_quantity: "0".to_string(),
         }
     }).await.unwrap();
     println!("[rust-server] Sent batch_start");

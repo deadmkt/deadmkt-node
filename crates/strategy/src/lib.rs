@@ -100,6 +100,7 @@ pub struct BatchStartData {
     pub circulating: HashMap<String, String>,
     pub vault_locks: Vec<VaultLockData>,
     pub node_health: Option<NodeHealthData>,
+    pub min_trade_quantity: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -390,6 +391,7 @@ impl StrategyEvent {
                         "timestamp": nh.timestamp,
                     });
                 }
+                obj["min_trade_quantity"] = serde_json::json!(data.min_trade_quantity);
                 obj
             }
             Self::RevealStart { data } => serde_json::json!({
@@ -718,6 +720,7 @@ mod tests {
                 },
                 vault_locks: vec![],
                 node_health: None,
+                min_trade_quantity: "100000".to_string(),
             },
         };
 

@@ -190,6 +190,7 @@ async fn t_int_b5_01_full_batch_cycle() {
                 circulating: HashMap::new(),
                 vault_locks: vec![],
                 node_health: None,
+                min_trade_quantity: "0".to_string(),
             },
         })
         .await
