@@ -360,9 +360,9 @@ pub fn wizard_generate_keypair(
 /// SUPRA_PER_TOKEN_UNIT = 100 quants per base unit.
 const SUPRA_PER_TOKEN_UNIT: u64 = 100;
 
-/// Reserve 70% of SUPRA for gas, use 30% for minting.
+/// Use 70% of SUPRA for initial token minting, reserve 30% for gas.
 /// Strategy can mint more on-demand if needed.
-const MINT_SUPRA_FRACTION_PCT: u64 = 30;
+const MINT_SUPRA_FRACTION_PCT: u64 = 70;
 
 /// Step 4: wait for funding
 /// On testnet, waits for SUPRA then mints Trippples tokens (EMM/KAY/TEE).

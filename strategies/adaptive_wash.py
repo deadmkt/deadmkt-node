@@ -7,6 +7,12 @@ SHA256(batch_id : pair : nft_id : epoch).  No coordination protocol
 needed — nodes independently take opposite sides and produce real
 cross-node trades.
 
+v4 changes:
+- Per-pair base prices: EMM/KAY=0.05, KAY/TEE=1.0, TEE/EMM=20.0
+  (was single BASE_PRICE=0.05 for all pairs — wrong by 20-400x on 2 pairs)
+- Read min_trade_quantity from batch_start instead of hardcoded MIN_QTY
+- Fallback to hardcoded MIN_QTY if node doesn't provide min_trade_quantity
+
 v3.1 changes:
 - REMOVED per-pair LOW_RATIO override entirely. It was synchronizing
   all nodes to the same side when system-wide drift created similar
@@ -57,12 +63,16 @@ SELL_PAIR = {
     "TEE": "TEE/EMM",
 }
 
-BASE_PRICE = Decimal("0.05")
+PAIR_BASE_PRICES = {
+    "EMM/KAY": Decimal("0.05"),    # 1 EMM costs 0.05 KAY
+    "KAY/TEE": Decimal("1.0"),     # 1 KAY costs 1.0 TEE
+    "TEE/EMM": Decimal("20.0"),    # 1 TEE costs 20.0 EMM
+}
 SPREAD = Decimal("0.003")
 DRIFT_CLAMP = Decimal("0.05")
 ALLOC_PCT = Decimal("0.02")           # flat 2% — NOT divided by node count
 MIN_BALANCE = Decimal("0.1")           # lowered from 1.0
-MIN_QTY = Decimal("0.10000")           # lowered from 1.0 — allows tiny recovery orders
+MIN_QTY = Decimal("0.10000")          # fallback if node doesn't provide min_trade_quantity
 # Per-pair override REMOVED in v3.1 — it synchronized all nodes to the
 # same side when system-wide drift created similar balance patterns,
 # causing complete market freezes. Triangle rebalancer + emergency mode
@@ -90,6 +100,7 @@ ESCROW_THRESHOLD = Decimal("5.0")
 _nft_id = None
 _mint_sent_at = 0
 _mint_pending = False
+_min_qty = MIN_QTY                     # updated from batch_start min_trade_quantity
 
 
 # ── Deterministic role assignment (with epoch rotation) ───────────────
@@ -101,12 +112,13 @@ def _role_for(batch_id, pair_name, nft_id):
 
 
 def _deterministic_mid(batch_id, pair_name):
-    """Deterministic mid-price all nodes agree on."""
+    """Deterministic mid-price all nodes agree on (per-pair base price)."""
+    base = PAIR_BASE_PRICES.get(pair_name, Decimal("0.05"))
     h = hashlib.sha256(f"price:{batch_id}:{pair_name}".encode()).digest()
     raw = int.from_bytes(h[:4], "big")
     frac = Decimal(raw) / Decimal(2**32)
     drift = DRIFT_CLAMP * (2 * frac - 1)
-    return BASE_PRICE * (1 + drift)
+    return base * (1 + drift)
 
 
 # _maybe_override_role REMOVED in v3.1 — see note above
@@ -224,7 +236,7 @@ def _build_orders(escrow, batch_id, peers_in_pool):
                 buy_price = mid * (Decimal("1") + SPREAD)
                 spend = quote_bal * EMERGENCY_ALLOC
                 qty = (spend / buy_price).quantize(Decimal("0.00001"))
-                if qty >= MIN_QTY:
+                if qty >= _min_qty:
                     orders.append({
                         "pair": pair,
                         "side": "buy",
@@ -234,7 +246,7 @@ def _build_orders(escrow, batch_id, peers_in_pool):
             elif target_role == "sell" and base_bal > MIN_BALANCE:
                 sell_price = mid * (Decimal("1") - SPREAD)
                 qty = (base_bal * EMERGENCY_ALLOC).quantize(Decimal("0.00001"))
-                if qty >= MIN_QTY:
+                if qty >= _min_qty:
                     orders.append({
                         "pair": pair,
                         "side": "sell",
@@ -276,7 +288,7 @@ def _build_orders(escrow, batch_id, peers_in_pool):
         if role == "sell" and base_bal >= MIN_BALANCE:
             sell_price = mid * (Decimal("1") - SPREAD)
             qty = (base_bal * effective_alloc).quantize(Decimal("0.00001"))
-            if qty >= MIN_QTY:
+            if qty >= _min_qty:
                 orders.append({
                     "pair": pair,
                     "side": "sell",
@@ -288,7 +300,7 @@ def _build_orders(escrow, batch_id, peers_in_pool):
             buy_price = mid * (Decimal("1") + SPREAD)
             spend = quote_bal * effective_alloc
             qty = (spend / buy_price).quantize(Decimal("0.00001"))
-            if qty >= MIN_QTY:
+            if qty >= _min_qty:
                 orders.append({
                     "pair": pair,
                     "side": "buy",
@@ -309,7 +321,7 @@ def on_auth(data):
 
 # ── on_batch_start ────────────────────────────────────────────────────
 def on_batch_start(ctx):
-    global _mint_sent_at, _mint_pending
+    global _mint_sent_at, _mint_pending, _min_qty
 
     escrow = ctx.get("escrow", {})
     mint_state = ctx.get("mint_state", {})
@@ -317,6 +329,16 @@ def on_batch_start(ctx):
     batch_id = ctx.get("batch_id", 0)
     peers_in_pool = ctx.get("peers_in_pool", 0)
     token_actions = []
+
+    # Read protocol minimum from node (DMKT11+)
+    min_trade_str = ctx.get("min_trade_quantity", "")
+    if min_trade_str:
+        try:
+            protocol_min = Decimal(min_trade_str)
+            if protocol_min > 0:
+                _min_qty = protocol_min
+        except Exception:
+            pass
 
     # ── Token management (non-blocking) ──
     if mint_state.get("has_pending_mint", False):
