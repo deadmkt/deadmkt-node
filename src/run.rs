@@ -704,7 +704,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     // unsubscribe) are sent to the swarm task via a command channel.
 
     let (swarm_cmd_tx, mut swarm_cmd_rx) = tokio::sync::mpsc::channel::<SwarmCommand>(64);
-    let (gossip_inbound_tx, mut gossip_inbound_rx) = tokio::sync::mpsc::channel::<GossipMessage>(8192);
+    let (gossip_inbound_tx, mut gossip_inbound_rx) = tokio::sync::mpsc::channel::<GossipMessage>(32768);
     let gossip_peer_count = Arc::new(AtomicU64::new(0));
     let gossip_peer_count_writer = gossip_peer_count.clone();
     let bootstrap_peers_for_task: Vec<String> = config.bootstrap_peers.clone();
@@ -1438,6 +1438,13 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                     // ── Phase handlers ────────────────────────────────
                     match new_phase {
                         Phase::Commit => {
+                            // GOSSIP-1: Drain buffered gossip before commit processing
+                            while let Ok(msg) = gossip_inbound_rx.try_recv() {
+                                process_inbound_gossip(
+                                    msg, &mut gossip_validator, &mut orchestrator,
+                                );
+                            }
+
                             // Fresh commit cycle
                             orchestrator.published_commits.clear();
                             orchestrator.committed_orders.clear();
@@ -1524,6 +1531,13 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             flush_gossip_via_channel(&orchestrator.gossip, &swarm_cmd_tx);
                         }
                         Phase::Reveal => {
+                            // GOSSIP-1: Drain buffered gossip before reveal processing
+                            while let Ok(msg) = gossip_inbound_rx.try_recv() {
+                                process_inbound_gossip(
+                                    msg, &mut gossip_validator, &mut orchestrator,
+                                );
+                            }
+
                             let my_commits = orchestrator.published_commits.len();
 
                             // SP6a: Send reveal_start to strategy, allow selective reveal
@@ -1601,6 +1615,13 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             }
                         }
                         Phase::Swap => {
+                            // GOSSIP-1: Drain buffered gossip before swap processing
+                            while let Ok(msg) = gossip_inbound_rx.try_recv() {
+                                process_inbound_gossip(
+                                    msg, &mut gossip_validator, &mut orchestrator,
+                                );
+                            }
+
                             let n = orchestrator.on_swap_phase();
                             if n > 0 {
                                 println!("[swap] {} matches to settle", n);
