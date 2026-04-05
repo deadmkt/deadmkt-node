@@ -1,0 +1,24 @@
+[package]
+name = "deadmkt-settlement"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deadmkt-chain = { path = "../chain" }
+deadmkt-crypto = { path = "../crypto" }
+deadmkt-matching = { path = "../matching" }
+deadmkt-escrow-tracker = { path = "../escrow_tracker" }
+deadmkt-storage = { path = "../storage" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+bcs = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha3 = "0.10"
+
+[dev-dependencies]
+rand = { workspace = true }
+wiremock = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,30 @@
+services:
+  node:
+    build: .
+    container_name: deadmkt-node
+    stdin_open: true
+    tty: true
+    volumes:
+      - node-data:/data
+      - ${STRATEGY_PATH:-./starter_bot/strategy.py}:/data/strategy.py
+    ports:
+      - "${WS_PORT:-9090}:9090"
+      - "${GOSSIP_PORT:-9191}:9191"
+    environment:
+      - DEADMKT_DATA_DIR=/data
+      - DEADMKT_KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD:-}
+      - DEADMKT_AUTH_TOKEN=${AUTH_TOKEN:-}
+      - DEADMKT_DIAL_PEERS=${DIAL_PEERS:-}
+      - DEADMKT_CONTRACT_ADDR=${CONTRACT_ADDR:-}
+      - DEADMKT_NO_STRATEGY=${NO_STRATEGY:-}
+    restart: always
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9191"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  node-data:
+    name: deadmkt-node-data
