@@ -550,7 +550,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     if !wallet_balances.is_empty() {
         println!("  Wallet:   {:?}", wallet_balances);
     }
-    let mint_state = fetch_mint_state(&chain, &config.trustee_address).await;
+    let mut mint_state = fetch_mint_state(&chain, &config.trustee_address).await;
     println!("  MintState: {} (hold={}s, pending={})", mint_state.state, mint_state.hold_duration_secs, mint_state.has_pending_mint);
     let circulating = fetch_circulating_supply(&chain, &token_decimals).await;
     if !circulating.is_empty() {
@@ -1489,6 +1489,9 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_secs()).unwrap_or(0),
                                 };
+                                // Refresh mint state every batch so strategy sees pending claims
+                                mint_state = fetch_mint_state(&chain, &config.trustee_address).await;
+
                                 let _ = strategy_server.send_event(StrategyEvent::BatchStart {
                                     data: make_batch_start(new_batch_id, pool_id, &params, num_pools, &esc_proj2, &esc_conf2, &wallet_balances, &gas_manager.balance_display(), peers2, &last_batch_data, pending_setts2, Some(health2), &mint_state, &circulating, &vault_locks, global_min_trade),
                                 }).await;
@@ -2329,15 +2332,18 @@ async fn fetch_mint_state(
                     vec![serde_json::json!(trustee_address)],
                 ).await {
                     Ok(pm) => {
-                        // Try to extract claimable_at from the struct
-                        // Supra view returns it as a nested object or array
+                        // Supra returns Option<PendingMint> as {"vec": [{struct}]} or {"vec": []}
+                        // Unwrap the Option wrapper first, then extract claimable_at
                         pm.get(0)
+                            .and_then(|v| v.get("vec"))
+                            .and_then(|v| v.get(0))
                             .and_then(|v| v.get("claimable_at"))
                             .and_then(|v| v.as_str())
                             .and_then(|s| s.parse::<u64>().ok())
                             .or_else(|| {
+                                // Fallback: try direct access (non-Option format)
                                 pm.get(0)
-                                    .and_then(|v| v.get(4)) // 5th field: claimable_at
+                                    .and_then(|v| v.get("claimable_at"))
                                     .and_then(|v| v.as_str())
                                     .and_then(|s| s.parse::<u64>().ok())
                             })

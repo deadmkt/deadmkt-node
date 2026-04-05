@@ -13,19 +13,17 @@ cargo test
 
 - No crate interface breaks without explicit approval
 - No non-ASCII characters in .move files (applies to companion contract repo)
-- Local git only (no push to remotes)
 - Tag before and after significant changes
 - Each save point must be independently deployable
 - Strategy crate has zero external dependencies by design -- keep it that way
 
 ## Architecture
 
-- 19 crates in `crates/`, main wiring in `src/run.rs`
+- 17 crates in `crates/`, main wiring in `src/run.rs`
 - Gossip swarm runs in a dedicated tokio::spawn task (SwarmCommand channel for outbound, mpsc for inbound)
 - Main loop is a `tokio::select!` with two arms: gossip drain + chain poll
 - Settlement worker runs in a separate tokio::spawn with tx_lock shared with token_worker
 - Strategy communicates over WebSocket (bridge.py on Python side)
-- Planning docs live in `~/Projects/planning/`
 
 ## Key Files
 
@@ -68,8 +66,6 @@ Chain: Supra Testnet (chain_id: 6)
 - tokio (async runtime): https://docs.rs/tokio/latest/tokio/
 - BCS serialization: https://docs.rs/bcs/latest
 
-### Project planning
-- Current status + deploy checklist: ~/Projects/planning/current/
-- Contract API reference: ~/Projects/planning/reference/CONTRACT_API_REFERENCE.md
-- DMKT9 future plans: ~/Projects/planning/future/
-- Archived DMKT8 diagnosis: ~/Projects/planning/archive/dmkt8-planning/
+### Project
+- Documentation: https://deadmkt.com/docs/
+- Contract API reference: https://deadmkt.com/docs/guides/websocket-api
