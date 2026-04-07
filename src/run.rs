@@ -1346,6 +1346,18 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             }
                         }
 
+                        // ── Expire stale pending settlements ──────────
+                        // Prune entries older than 100 batches (~10 min)
+                        {
+                            let mut mgr = settlement_mgr.lock().unwrap();
+                            let before = mgr.pending_count();
+                            mgr.expire_stale(new_batch_id, 100);
+                            let after = mgr.pending_count();
+                            if before != after {
+                                println!("[settle] expired {} stale pending settlements ({} remaining)", before - after, after);
+                            }
+                        }
+
                         // ── Heartbeat ──────────────────────────────────
                         // Skip if a settlement recently refreshed the heartbeat on-chain
                         let has_capital = escrow_balances.values().any(|v| {
