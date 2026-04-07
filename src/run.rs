@@ -859,8 +859,9 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
 
     let mut gas_manager = GasManager::new(8); // SUPRA has 8 decimals
     {
-        let supra_bal = fetch_supra_balance(&chain, &config.trustee_address).await;
-        gas_manager.update_balance(supra_bal);
+        if let Some(supra_bal) = fetch_supra_balance(&chain, &config.trustee_address).await {
+            gas_manager.update_balance(supra_bal);
+        }
         println!("  Gas bal:   {} SUPRA (status: {:?})", gas_manager.balance_display(), gas_manager.check_status());
     }
 
@@ -1330,16 +1331,17 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                         // Heartbeat on NFT-offset schedule
                         // ── Periodic gas balance refresh ──────────────
                         if new_batch_id % 10 == 0 {
-                            let supra_bal = fetch_supra_balance(&chain, &config.trustee_address).await;
-                            let (old_status, new_status) = gas_manager.update_balance(supra_bal);
-                            if new_status != old_status {
-                                match new_status {
-                                    deadmkt_gas_manager::GasStatus::Low =>
-                                        eprintln!("[gas] WARNING: balance low ({})", gas_manager.balance_display()),
-                                    deadmkt_gas_manager::GasStatus::Critical =>
-                                        eprintln!("[gas] CRITICAL: balance depleted ({})", gas_manager.balance_display()),
-                                    deadmkt_gas_manager::GasStatus::Normal =>
-                                        println!("[gas] balance recovered ({})", gas_manager.balance_display()),
+                            if let Some(supra_bal) = fetch_supra_balance(&chain, &config.trustee_address).await {
+                                let (old_status, new_status) = gas_manager.update_balance(supra_bal);
+                                if new_status != old_status {
+                                    match new_status {
+                                        deadmkt_gas_manager::GasStatus::Low =>
+                                            eprintln!("[gas] WARNING: balance low ({})", gas_manager.balance_display()),
+                                        deadmkt_gas_manager::GasStatus::Critical =>
+                                            eprintln!("[gas] CRITICAL: balance depleted ({})", gas_manager.balance_display()),
+                                        deadmkt_gas_manager::GasStatus::Normal =>
+                                            println!("[gas] balance recovered ({})", gas_manager.balance_display()),
+                                    }
                                 }
                             }
                         }
@@ -2028,7 +2030,7 @@ async fn submit_heartbeat(
 async fn fetch_supra_balance(
     chain: &deadmkt_chain::client::SupraClient,
     address: &str,
-) -> u64 {
+) -> Option<u64> {
     match chain.view_absolute(
         "0x1::coin::balance",
         vec!["0x1::supra_coin::SupraCoin".to_string()],
@@ -2037,9 +2039,8 @@ async fn fetch_supra_balance(
         Ok(val) => {
             val.get(0)
                 .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-                .unwrap_or(0)
         }
-        Err(_) => 0,
+        Err(_) => None,
     }
 }
 
