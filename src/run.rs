@@ -1165,6 +1165,11 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
         });
     }
 
+    // Timer to drain gossip independently of chain poller.
+    // Prevents channel overflow when poller backs off on RPC errors.
+    let mut drain_interval = tokio::time::interval(Duration::from_millis(500));
+    drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             // ── Graceful shutdown ────────────────────────────────────
@@ -1182,6 +1187,19 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                 process_inbound_gossip(
                     msg, &mut gossip_validator, &mut orchestrator,
                 );
+            }
+
+            // ── ARM 3: Periodic gossip drain ─────────────────────────
+            //
+            // Safety net: drain all buffered gossip every 500ms even if
+            // the chain poller is stalled. Prevents channel overflow on
+            // bootstrap peers and trading nodes during RPC backoff.
+            _ = drain_interval.tick() => {
+                while let Ok(msg) = gossip_inbound_rx.try_recv() {
+                    process_inbound_gossip(
+                        msg, &mut gossip_validator, &mut orchestrator,
+                    );
+                }
             }
 
             // ── ARM 2: Block update from dedicated chain poller ─────
