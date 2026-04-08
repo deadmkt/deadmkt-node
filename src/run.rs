@@ -1183,10 +1183,14 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
             // Messages arrive from the dedicated swarm task. We validate
             // and store them immediately so they're available when the
             // next phase handler runs.
+            // Bootstrap peers: discard messages — gossipsub relays at the
+            // network layer without application processing.
             Some(msg) = gossip_inbound_rx.recv() => {
-                process_inbound_gossip(
-                    msg, &mut gossip_validator, &mut orchestrator,
-                );
+                if !bootstrap_mode {
+                    process_inbound_gossip(
+                        msg, &mut gossip_validator, &mut orchestrator,
+                    );
+                }
             }
 
             // ── ARM 3: Periodic gossip drain ─────────────────────────
@@ -1196,9 +1200,11 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
             // bootstrap peers and trading nodes during RPC backoff.
             _ = drain_interval.tick() => {
                 while let Ok(msg) = gossip_inbound_rx.try_recv() {
-                    process_inbound_gossip(
-                        msg, &mut gossip_validator, &mut orchestrator,
-                    );
+                    if !bootstrap_mode {
+                        process_inbound_gossip(
+                            msg, &mut gossip_validator, &mut orchestrator,
+                        );
+                    }
                 }
             }
 
@@ -1211,9 +1217,11 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
 
                 // GOSSIP-1: Drain ALL buffered gossip before phase evaluation.
                 while let Ok(msg) = gossip_inbound_rx.try_recv() {
-                    process_inbound_gossip(
-                        msg, &mut gossip_validator, &mut orchestrator,
-                    );
+                    if !bootstrap_mode {
+                        process_inbound_gossip(
+                            msg, &mut gossip_validator, &mut orchestrator,
+                        );
+                    }
                 }
 
                 if block <= last_block {
@@ -1468,6 +1476,13 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                     }
 
                     // ── Phase handlers ────────────────────────────────
+                    // Bootstrap peers skip all phase processing — they only relay gossip.
+                    if bootstrap_mode {
+                        // Drain inbound gossip to prevent channel overflow
+                        while let Ok(_) = gossip_inbound_rx.try_recv() {}
+                    }
+
+                    if !bootstrap_mode {
                     match new_phase {
                         Phase::Commit => {
                             // GOSSIP-1: Drain buffered gossip before commit processing
@@ -1714,6 +1729,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             }
                         }
                     }
+                    } // if !bootstrap_mode
                 }
 
                 // 8d. Drain async settlement results from background worker
