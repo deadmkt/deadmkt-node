@@ -1166,8 +1166,10 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     }
 
     // Timer to drain gossip independently of chain poller.
-    // Prevents channel overflow when poller backs off on RPC errors.
-    let mut drain_interval = tokio::time::interval(Duration::from_millis(500));
+    // Bootstrap: 50ms (aggressive drain, just discarding)
+    // Trading: 500ms (safety net, actual processing)
+    let drain_ms = if bootstrap_mode { 50 } else { 500 };
+    let mut drain_interval = tokio::time::interval(Duration::from_millis(drain_ms));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -1183,14 +1185,11 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
             // Messages arrive from the dedicated swarm task. We validate
             // and store them immediately so they're available when the
             // next phase handler runs.
-            // Bootstrap peers: discard messages — gossipsub relays at the
-            // network layer without application processing.
-            Some(msg) = gossip_inbound_rx.recv() => {
-                if !bootstrap_mode {
-                    process_inbound_gossip(
-                        msg, &mut gossip_validator, &mut orchestrator,
-                    );
-                }
+            // Bootstrap peers skip this arm — drain timer handles discarding.
+            Some(msg) = gossip_inbound_rx.recv(), if !bootstrap_mode => {
+                process_inbound_gossip(
+                    msg, &mut gossip_validator, &mut orchestrator,
+                );
             }
 
             // ── ARM 3: Periodic gossip drain ─────────────────────────
