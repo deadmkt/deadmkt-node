@@ -708,6 +708,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let gossip_peer_count = Arc::new(AtomicU64::new(0));
     let gossip_peer_count_writer = gossip_peer_count.clone();
     let bootstrap_peers_for_task: Vec<String> = config.bootstrap_peers.clone();
+    let relay_only = std::env::var("DEADMKT_NO_STRATEGY").map(|v| v == "1").unwrap_or(false);
 
     let _gossip_task = tokio::spawn(async move {
         let mut drop_count: u64 = 0;
@@ -723,11 +724,18 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                         }) => {
                             match gossip_messages::deserialize(&message.data) {
                                 Ok(msg) => {
-                                    // Non-blocking send — if main loop is behind, drop oldest
-                                    if let Err(_) = gossip_inbound_tx.try_send(msg) {
-                                        drop_count += 1;
-                                        if drop_count == 1 || drop_count % 1000 == 0 {
-                                            eprintln!("[gossip-task] inbound channel full, {} messages dropped", drop_count);
+                                    // Bootstrap/relay: skip channel entirely — gossipsub
+                                    // already relayed at the network layer.
+                                    if relay_only {
+                                        // Message deserialized (validates format) but not queued.
+                                        // Gossipsub propagation happened before we got here.
+                                    } else {
+                                        // Non-blocking send — if main loop is behind, drop oldest
+                                        if let Err(_) = gossip_inbound_tx.try_send(msg) {
+                                            drop_count += 1;
+                                            if drop_count == 1 || drop_count % 1000 == 0 {
+                                                eprintln!("[gossip-task] inbound channel full, {} messages dropped", drop_count);
+                                            }
                                         }
                                     }
                                 }
