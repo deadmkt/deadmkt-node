@@ -1,0 +1,14 @@
+[package]
+name = "deadmkt-batch-state"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deadmkt-crypto = { path = "../crypto" }
+deadmkt-matching = { path = "../matching" }
+deadmkt-chain = { path = "../chain" }
+deadmkt-gossip-validation = { path = "../gossip_validation" }
+ed25519-dalek = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
