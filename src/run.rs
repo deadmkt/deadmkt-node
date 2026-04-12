@@ -1014,17 +1014,17 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     }
 
     // N9: Spawn dedicated chain poller task
+    // Bootstrap peers skip the poller entirely — they don't process blocks.
+    // This avoids RPC backoff stalling the select loop and causing gossipsub
+    // heartbeat timeouts that prune peers from the mesh.
     let (block_tx, mut block_rx) = tokio::sync::watch::channel(ledger.block_height);
+    if !bootstrap_mode {
     {
         let poller_client = SupraClient::new(
             config.rpc_urls.clone(),
             config.contracts.settlement.clone(),
         );
-        let poll_base = if bootstrap_mode {
-            Duration::from_secs(2)
-        } else {
-            Duration::from_millis(200)
-        };
+        let poll_base = Duration::from_millis(200);
         tokio::spawn(async move {
             let base_interval = poll_base;
             let mut backoff = Duration::ZERO;
@@ -1109,6 +1109,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
             }
         });
     }
+    } // if !bootstrap_mode — skip chain poller
 
     // SP5: Track last batch stats for strategy visibility
     let mut last_batch_data: Option<deadmkt_strategy::LastBatchData> = None;
@@ -1219,7 +1220,8 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
             //
             // N9: The RPC call runs in a separate task. This arm only fires
             // when a new block height is available — no await, no blocking.
-            Ok(()) = block_rx.changed() => {
+            // Bootstrap peers skip — no poller running, this would block forever.
+            Ok(()) = block_rx.changed(), if !bootstrap_mode => {
                 let block = *block_rx.borrow();
 
                 // GOSSIP-1: Drain ALL buffered gossip before phase evaluation.
