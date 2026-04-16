@@ -2364,7 +2364,7 @@ async fn fetch_mint_state(
     let state_u8 = global.get(0).and_then(|v| v.as_str()).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
     let state_str = match state_u8 {
         0 => "AWAITING_TRIGGER",
-        1 => "VDRF_PENDING",
+        1 => "DVRF_PENDING",
         2 => "OPEN",
         3 => "BLOCKED",
         _ => "UNKNOWN",

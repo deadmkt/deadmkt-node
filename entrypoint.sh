@@ -22,14 +22,11 @@ fi
 
 DATA_DIR="${DEADMKT_DATA_DIR:-/data}"
 
-# First boot: run setup wizard interactively before anything else
+# First boot: require config + keystore to exist
 if [ ! -f "$DATA_DIR/config.json" ] || [ ! -f "$DATA_DIR/keystore.json" ]; then
-    echo "[entrypoint] First boot detected — running setup wizard..."
-    if ! deadmkt-node setup; then
-        echo "[entrypoint] Setup failed. Exiting."
-        exit 1
-    fi
-    echo "[entrypoint] Setup complete. Starting node..."
+    echo "[entrypoint] FATAL: No config.json or keystore.json found in $DATA_DIR"
+    echo "[entrypoint] Run setup first:  docker run -it -v <volume>:/data <image> deadmkt-node setup"
+    exit 1
 fi
 
 # Read auth token from config.json if not overridden

@@ -37,7 +37,7 @@ All modules deployed under a single address. 5 modules: `nft`, `escrow`, `settle
 ### Mint State Machine
 
 ```
-AWAITING_TRIGGER (0) ──request_mint──→ VDRF_PENDING (1)
+AWAITING_TRIGGER (0) ──request_mint──→ DVRF_PENDING (1)
                                            │
                            VRF callback    │
                           ┌────────────────┘
@@ -88,7 +88,7 @@ Start a mint. Transfers SUPRA bond to PendingMintEscrow.
 - **Subsequent mints:** Depends on global state:
   - `AWAITING_TRIGGER`: Caller becomes VRF trigger. SUPRA locked. VRF fires.
   - `OPEN`: Mint window open. Immediate pending with current hold duration.
-  - `VDRF_PENDING`: **Blocked.** Must wait for VRF to resolve.
+  - `DVRF_PENDING`: **Blocked.** Must wait for VRF to resolve.
   - `BLOCKED`: **Blocked.** Must wait for block_end.
 
 **Preconditions:** Registered escrow, no existing pending mint, validate_amounts passes.
@@ -126,9 +126,9 @@ Unlock tokens after minimum duration. Returns to wallet.
 **Strategy JSON:** `{"action": "unlock", "lock_index": <u64>}`
 
 #### `cancel_pending_mint(caller)`
-Cancel own pending mint after VRF timeout. Refunds SUPRA. Only callable by the trigger minter after `vdrf_timeout_blocks`.
+Cancel own pending mint after VRF timeout. Refunds SUPRA. Only callable by the trigger minter after `dvrf_timeout_blocks`.
 
-#### `cancel_expired_vdrf(_caller)`
+#### `cancel_expired_dvrf(_caller)`
 Permissionless cleanup. Anyone can call to unblock minting when VRF callback hasn't arrived after timeout. Refunds SUPRA to original trigger trustee.
 
 ### View Functions
@@ -136,7 +136,7 @@ Permissionless cleanup. Anyone can call to unblock minting when VRF callback has
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `get_mint_state()` | (state, period_end, hold_duration, block_end, rotation_index) | Global mint state machine |
-| `get_mint_config()` | (first_mint_hold_secs, vdrf_timeout_blocks, block_base_duration_secs, rotation_hour_step, vdrf_enabled) | Admin-configurable timing |
+| `get_mint_config()` | (first_mint_hold_secs, dvrf_timeout_blocks, block_base_duration_secs, rotation_hour_step, dvrf_enabled) | Admin-configurable timing |
 | `get_circulating_supply()` | (m, k, t) | Total circulating raw amounts |
 | `get_total_minted()` | (m, k, t) | Total ever minted |
 | `get_treasury_balance()` | u64 | SUPRA in treasury |
@@ -149,7 +149,7 @@ Permissionless cleanup. Anyone can call to unblock minting when VRF callback has
 | `get_all_metadata_addresses()` | (emm, kay, tee) | All three in one call |
 | `get_token_balance(addr, symbol)` | u64 | FA wallet balance |
 | `has_pending_mint(addr)` | bool | Has unclaimed mint |
-| `is_vdrf_trigger(addr)` | bool | Is current VRF trigger minter |
+| `is_dvrf_trigger(addr)` | bool | Is current VRF trigger minter |
 | `has_active_locks(addr)` | bool | Has unclaimed locks |
 
 ---
@@ -320,7 +320,7 @@ The node sends `batch_start` every commit phase. Fields available to strategy:
 5. Decide ratio: favor low tokens, respect validate_amounts rules
 6. Check mint_state:
    - AWAITING_TRIGGER or OPEN → can mint
-   - VDRF_PENDING → blocked, wait
+   - DVRF_PENDING → blocked, wait
    - BLOCKED → blocked, wait for block_end
 7. Check has_pending_mint → if true, wait for claimable_at → claim_mint
 8. Send mint action with calculated amounts

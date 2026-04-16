@@ -5,7 +5,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "deadmkt-node", version = "0.1.0", about = "deadmkt trading node")]
+#[command(name = "deadmkt-node", version = env!("CARGO_PKG_VERSION"), about = "deadmkt trading node")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,

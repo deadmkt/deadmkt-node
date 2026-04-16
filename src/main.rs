@@ -238,6 +238,8 @@ async fn main() {
             println!("  Status: INACTIVE");
 
             // Step 2: Check for pending mint
+            // NOTE: Contract reactivate() function needed to allow instant reactivation
+            // when escrow has tokens. Until then, only mint path works.
             let pending_mint = match client.view_raw(
                 "tokens", "get_pending_mint", vec![],
                 vec![serde_json::json!(config.trustee_address)],
@@ -264,7 +266,6 @@ async fn main() {
                 if claimable_at > 0 && now >= claimable_at {
                     println!("  Pending mint is CLAIMABLE — submitting claim_mint...");
 
-                    // Load keystore and submit claim_mint
                     let mode = detect_keystore_mode(&keystore_path).unwrap_or(KeystoreMode::Missing);
                     let (signing_key, _) = match mode {
                         KeystoreMode::Insecure => {
@@ -347,7 +348,6 @@ async fn main() {
             } else {
                 println!("  No pending mint — submitting minimum mint (10 tokens, 1 SUPRA)...");
 
-                // Load keystore and submit request_mint(400000, 300000, 300000)
                 let mode = detect_keystore_mode(&keystore_path).unwrap_or(KeystoreMode::Missing);
                 let (signing_key, _) = match mode {
                     KeystoreMode::Insecure => {
@@ -382,7 +382,6 @@ async fn main() {
                     deadmkt_config::Network::Mainnet => 1u8,
                 };
 
-                // Mint args: m=400000, k=300000, t=300000 (10 tokens total, 1 SUPRA)
                 let args = vec![
                     bcs::to_bytes(&400000u64).expect("bcs"),
                     bcs::to_bytes(&300000u64).expect("bcs"),

@@ -107,6 +107,21 @@ impl SupraClient {
         Ok(())
     }
 
+    /// Parse response body as JSON, logging raw text on failure.
+    async fn parse_json(resp: reqwest::Response) -> Result<Value, ChainError> {
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| {
+            ChainError::NetworkError(format!("failed to read response body: {}", e))
+        })?;
+        serde_json::from_str(&text).map_err(|e| {
+            let preview: String = text.chars().take(200).collect();
+            ChainError::DeserializationError(format!(
+                "HTTP {} — not valid JSON: {} — raw: {}",
+                status, e, preview
+            ))
+        })
+    }
+
     fn next_endpoint(&self) -> String {
         let idx = self.current_endpoint.fetch_add(1, Ordering::Relaxed) % self.endpoints.len();
         self.endpoints[idx].clone()
@@ -161,9 +176,7 @@ impl SupraClient {
                     }
 
                     if resp.status().is_success() {
-                        let json: Value = resp.json().await.map_err(|e| {
-                            ChainError::DeserializationError(e.to_string())
-                        })?;
+                        let json: Value = Self::parse_json(resp).await?;
                         // Supra may return result directly as array, or wrapped in {"result": [...]}
                         if let Some(result) = json.get("result") {
                             return Ok(result.clone());
@@ -214,8 +227,7 @@ impl SupraClient {
 
         Self::check_rate_limit(&resp)?;
 
-        let json: Value = resp.json().await
-            .map_err(|e| ChainError::DeserializationError(e.to_string()))?;
+        let json: Value = Self::parse_json(resp).await?;
 
         // v2 returns height as integer (or sometimes string), handle both
         let block_height = json
@@ -251,8 +263,7 @@ impl SupraClient {
         let resp = self.http.get(&url).send().await
             .map_err(|e| ChainError::NetworkError(e.to_string()))?;
 
-        let json: Value = resp.json().await
-            .map_err(|e| ChainError::DeserializationError(e.to_string()))?;
+        let json: Value = Self::parse_json(resp).await?;
 
         // sequence_number: v2 returns integer, but handle string too for safety
         let seq = json
@@ -465,8 +476,7 @@ impl SupraClient {
 
         Self::check_rate_limit(&resp)?;
 
-        let json: Value = resp.json().await
-            .map_err(|e| ChainError::DeserializationError(e.to_string()))?;
+        let json: Value = Self::parse_json(resp).await?;
 
         // v3 response: {"data": [{"event": {..., "type": "...", "data": {...}}, "block_height": int, "transaction_hash": "..."}]}
         let data_arr = json

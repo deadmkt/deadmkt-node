@@ -679,7 +679,7 @@ pub async fn auto_mint_and_deposit(
 
     // ── Check 5: no pending mint — request first mint ──
     if first_mint_done {
-        // Second+ mint goes through global vDRF — could be days
+        // Second+ mint goes through global dVRF — could be days
         io.print("  First mint already completed. Requesting additional tokens...\n");
         io.print("  NOTE: subsequent mints use the global hold period (may take days).\n");
     } else {

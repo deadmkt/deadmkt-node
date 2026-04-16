@@ -117,7 +117,7 @@ pub struct NodeHealthData {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MintStateData {
-    pub state: String,          // "AWAITING_TRIGGER", "VDRF_PENDING", "OPEN", "BLOCKED"
+    pub state: String,          // "AWAITING_TRIGGER", "DVRF_PENDING", "OPEN", "BLOCKED"
     pub hold_duration_secs: u64,
     pub period_end: u64,
     pub block_end: u64,
