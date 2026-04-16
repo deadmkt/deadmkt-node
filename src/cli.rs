@@ -34,6 +34,8 @@ pub enum Command {
         #[arg(long)]
         amount: u64,
     },
+    /// Reactivate an inactive node by forcing a minimum mint
+    Reactivate,
     /// Force-apply pending param changes by calling auto_adjust_pools()
     ApplyParams,
     /// Update batch params on-chain (admin only)

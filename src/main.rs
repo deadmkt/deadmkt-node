@@ -203,6 +203,232 @@ async fn main() {
                 }
             }
         }
+        Command::Reactivate => {
+            println!("deadmkt-node — Reactivate Inactive Node\n");
+
+            let dir = data_dir();
+            let config_path = dir.join("config.json");
+            let keystore_path = dir.join("keystore.json");
+
+            let config = NodeConfig::load(&config_path).expect("failed to load config");
+            println!("  NFT ID:   {}", config.nft_id);
+            println!("  Trustee:  {}", config.trustee_address);
+
+            let client = deadmkt_chain::client::SupraClient::new(
+                config.rpc_urls.clone(),
+                config.contracts.settlement.clone(),
+            );
+
+            // Step 1: Check if active
+            let is_active = match client.view_raw(
+                "escrow", "is_active", vec![],
+                vec![serde_json::json!(config.nft_id.to_string())],
+            ).await {
+                Ok(r) => r.get(0).and_then(|v| v.as_bool()).unwrap_or(false),
+                Err(e) => {
+                    eprintln!("  Failed to check active status: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            if is_active {
+                println!("  Status: ACTIVE — no reactivation needed.");
+                return;
+            }
+            println!("  Status: INACTIVE");
+
+            // Step 2: Check for pending mint
+            let pending_mint = match client.view_raw(
+                "tokens", "get_pending_mint", vec![],
+                vec![serde_json::json!(config.trustee_address)],
+            ).await {
+                Ok(r) => {
+                    r.get(0)
+                        .and_then(|v| v.get("vec"))
+                        .and_then(|v| v.get(0))
+                        .cloned()
+                },
+                Err(_) => None,
+            };
+
+            if let Some(pm) = pending_mint {
+                let claimable_at = pm.get("claimable_at")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+
+                if claimable_at > 0 && now >= claimable_at {
+                    println!("  Pending mint is CLAIMABLE — submitting claim_mint...");
+
+                    // Load keystore and submit claim_mint
+                    let mode = detect_keystore_mode(&keystore_path).unwrap_or(KeystoreMode::Missing);
+                    let (signing_key, _) = match mode {
+                        KeystoreMode::Insecure => {
+                            deadmkt_keystore::load_keystore_insecure(&keystore_path)
+                                .expect("failed to load keystore")
+                        }
+                        KeystoreMode::Encrypted => {
+                            let password = std::env::var("DEADMKT_KEYSTORE_PASSWORD")
+                                .unwrap_or_else(|_| {
+                                    use std::io::{self, Write};
+                                    print!("  Password: ");
+                                    io::stdout().flush().unwrap();
+                                    let mut pw = String::new();
+                                    io::stdin().read_line(&mut pw).unwrap();
+                                    pw.trim().to_string()
+                                });
+                            deadmkt_keystore::load_keystore(&keystore_path, &password)
+                                .expect("failed to decrypt keystore")
+                        }
+                        KeystoreMode::Missing => {
+                            eprintln!("No keystore found.");
+                            std::process::exit(1);
+                        }
+                    };
+
+                    let sender_addr = deadmkt_settlement::parse_address(&config.trustee_address)
+                        .expect("invalid trustee address");
+                    let contract_addr = deadmkt_settlement::parse_address(&config.contracts.settlement)
+                        .expect("invalid contract address");
+                    let chain_id = match config.network {
+                        deadmkt_config::Network::Testnet => 6u8,
+                        deadmkt_config::Network::Mainnet => 1u8,
+                    };
+
+                    let tokens_client = deadmkt_chain::client::SupraClient::new(
+                        config.rpc_urls.clone(),
+                        config.contracts.settlement.clone(),
+                    );
+                    let sender_hex = format!("0x{}", hex::encode(sender_addr));
+                    let account = tokens_client.get_account(&sender_hex).await
+                        .expect("failed to get account info");
+
+                    let expiry = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() + 60;
+
+                    let signed_tx = deadmkt_settlement::build_and_sign_entry_function(
+                        &signing_key,
+                        sender_addr,
+                        contract_addr,
+                        "tokens",
+                        "claim_mint",
+                        vec![],
+                        account.sequence_number,
+                        expiry,
+                        chain_id,
+                        config.max_gas_amount,
+                        config.gas_unit_price,
+                    ).expect("failed to build transaction");
+
+                    match tokens_client.submit_raw(&signed_tx).await {
+                        Ok(hash) => {
+                            println!("  claim_mint submitted: {}", hash);
+                            println!("  Node should reactivate once deposit confirms.");
+                        }
+                        Err(e) => {
+                            eprintln!("  claim_mint failed: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                } else if claimable_at > 0 {
+                    let wait = claimable_at - now;
+                    println!("  Pending mint not yet claimable — {}h {}m remaining.",
+                        wait / 3600, (wait % 3600) / 60);
+                    println!("  Run this command again after the hold period expires.");
+                } else {
+                    println!("  Pending mint found but claimable_at unknown.");
+                }
+            } else {
+                println!("  No pending mint — submitting minimum mint (10 tokens, 1 SUPRA)...");
+
+                // Load keystore and submit request_mint(400000, 300000, 300000)
+                let mode = detect_keystore_mode(&keystore_path).unwrap_or(KeystoreMode::Missing);
+                let (signing_key, _) = match mode {
+                    KeystoreMode::Insecure => {
+                        deadmkt_keystore::load_keystore_insecure(&keystore_path)
+                            .expect("failed to load keystore")
+                    }
+                    KeystoreMode::Encrypted => {
+                        let password = std::env::var("DEADMKT_KEYSTORE_PASSWORD")
+                            .unwrap_or_else(|_| {
+                                use std::io::{self, Write};
+                                print!("  Password: ");
+                                io::stdout().flush().unwrap();
+                                let mut pw = String::new();
+                                io::stdin().read_line(&mut pw).unwrap();
+                                pw.trim().to_string()
+                            });
+                        deadmkt_keystore::load_keystore(&keystore_path, &password)
+                            .expect("failed to decrypt keystore")
+                    }
+                    KeystoreMode::Missing => {
+                        eprintln!("No keystore found.");
+                        std::process::exit(1);
+                    }
+                };
+
+                let sender_addr = deadmkt_settlement::parse_address(&config.trustee_address)
+                    .expect("invalid trustee address");
+                let contract_addr = deadmkt_settlement::parse_address(&config.contracts.settlement)
+                    .expect("invalid contract address");
+                let chain_id = match config.network {
+                    deadmkt_config::Network::Testnet => 6u8,
+                    deadmkt_config::Network::Mainnet => 1u8,
+                };
+
+                // Mint args: m=400000, k=300000, t=300000 (10 tokens total, 1 SUPRA)
+                let args = vec![
+                    bcs::to_bytes(&400000u64).expect("bcs"),
+                    bcs::to_bytes(&300000u64).expect("bcs"),
+                    bcs::to_bytes(&300000u64).expect("bcs"),
+                ];
+
+                let tokens_client = deadmkt_chain::client::SupraClient::new(
+                    config.rpc_urls.clone(),
+                    config.contracts.settlement.clone(),
+                );
+                let sender_hex = format!("0x{}", hex::encode(sender_addr));
+                let account = tokens_client.get_account(&sender_hex).await
+                    .expect("failed to get account info");
+
+                let expiry = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() + 60;
+
+                let signed_tx = deadmkt_settlement::build_and_sign_entry_function(
+                    &signing_key,
+                    sender_addr,
+                    contract_addr,
+                    "tokens",
+                    "request_mint",
+                    args,
+                    account.sequence_number,
+                    expiry,
+                    chain_id,
+                    config.max_gas_amount,
+                    config.gas_unit_price,
+                ).expect("failed to build transaction");
+
+                match tokens_client.submit_raw(&signed_tx).await {
+                    Ok(hash) => {
+                        println!("  request_mint submitted: {}", hash);
+                        println!("  Mint hold period will apply. Run 'deadmkt-node reactivate'");
+                        println!("  again after hold expires to claim and reactivate.");
+                    }
+                    Err(e) => {
+                        eprintln!("  request_mint failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
         Command::ApplyParams => {
             println!("deadmkt-node — Apply Pending Params\n");
 
