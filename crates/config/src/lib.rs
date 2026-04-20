@@ -257,6 +257,19 @@ impl NodeConfig {
         if let Ok(addr) = std::env::var("DEADMKT_POOL_CONFIG_ADDR") {
             if !addr.is_empty() { self.contracts.pool_config = addr; }
         }
+
+        // Gas overrides -- lets operators tune without rebuilding when
+        // testnet gas schedule drifts (#9 bump, #12 env overrides).
+        if let Ok(s) = std::env::var("DEADMKT_MAX_GAS") {
+            if let Ok(v) = s.parse::<u64>() {
+                if v > 0 { self.max_gas_amount = v; }
+            }
+        }
+        if let Ok(s) = std::env::var("DEADMKT_GAS_PRICE") {
+            if let Ok(v) = s.parse::<u64>() {
+                if v > 0 { self.gas_unit_price = v; }
+            }
+        }
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
