@@ -34,7 +34,8 @@ pub enum Command {
         #[arg(long)]
         amount: u64,
     },
-    /// Reactivate an inactive node by forcing a minimum mint
+    /// Reactivate an inactive node: try escrow::reactivate() first,
+    /// fall back to claim_mint or request_mint if escrow is empty / past grace
     Reactivate,
     /// Force-apply pending param changes by calling auto_adjust_pools()
     ApplyParams,
