@@ -1204,6 +1204,17 @@ mod tests {
             Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 500, vm_status: "ok".into() }) })
         }
 
+        // #19: override default (which returns 0). The wizard's first-mint
+        // claim path polls get_escrow_balance up to 30 times at 3s intervals
+        // waiting for tokens to appear. Returning 0 forever causes a 90s
+        // timeout in tests. Simulate a successfully-funded escrow so the
+        // wizard exits the polling loop on first check.
+        fn get_escrow_balance(&self, _nft_id: u64, _metadata_address: &str)
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, SetupError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(100_000) }) // 1 token, satisfies e > 0 && k > 0 && t > 0
+        }
+
         fn get_trippples_metadata(&self, symbol: u8)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, SetupError>> + Send + '_>>
         {
