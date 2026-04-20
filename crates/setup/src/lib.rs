@@ -425,6 +425,7 @@ pub async fn mint_nft_pair(
     chain: &dyn ChainClient,
     pubkey: &[u8],
     beneficiary: &str,
+    trustee_address: &str,
 ) -> Result<u64, SetupError> {
     let config = chain.get_nft_config().await?;
     let bond_display = config.bond_amount / 100_000_000; // 8 decimals
@@ -460,7 +461,10 @@ pub async fn mint_nft_pair(
         return Err(SetupError::ChainError(result.vm_status));
     }
 
-    let nft_id = chain.get_total_minted().await?;
+    // #14 fix: use per-address lookup, NOT the racy global total_minted counter.
+    // Concurrent wizards both read the same global and both claim the same nft_id,
+    // causing the loser to fail register_trader with E_NFT_MISMATCH.
+    let nft_id = chain.get_nft_id(trustee_address).await?;
     io.print(&format!("TrusteeNFT #{} minted successfully!\n", nft_id));
     Ok(nft_id)
 }
@@ -934,7 +938,7 @@ pub async fn run_wizard(
             nft_id
         }
         ExistingNft::NotFound => {
-            mint_nft_pair(io, chain, public.as_bytes(), &beneficiary).await?
+            mint_nft_pair(io, chain, public.as_bytes(), &beneficiary, &address).await?
         }
     };
 
@@ -1101,7 +1105,7 @@ mod tests {
             Self {
                 balance_responses: std::sync::Mutex::new(VecDeque::new()),
                 is_trustee_val: false,
-                nft_id_val: 0,
+                nft_id_val: 42,
                 beneficiary_val: String::new(),
                 nft_config: NftConfigInfo {
                     bond_amount: 1_000_000_000_000,
@@ -1353,7 +1357,7 @@ mod tests {
         let mock = MockChainClient::default_success();
         let pubkey = [1u8; 32];
 
-        let result = mint_nft_pair(&mut io, &mock, &pubkey, "0xBENEFICIARY").await;
+        let result = mint_nft_pair(&mut io, &mock, &pubkey, "0xBENEFICIARY", "0xTRUSTEE").await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 42);
         assert!(io.output_contains("Bond required"));
@@ -1370,7 +1374,7 @@ mod tests {
 
         let mock = MockChainClient::default_success();
 
-        let result = mint_nft_pair(&mut io, &mock, &[1u8; 32], "0xBENEF").await;
+        let result = mint_nft_pair(&mut io, &mock, &[1u8; 32], "0xBENEF", "0xTRUSTEE").await;
         assert!(matches!(result, Err(SetupError::UserDeclined)));
     }
 
