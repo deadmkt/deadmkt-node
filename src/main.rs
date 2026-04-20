@@ -78,7 +78,23 @@ async fn main() {
                 }
                 Err(e) => {
                     eprintln!("\nSetup failed: {}", e);
-                    eprintln!("You can re-run 'deadmkt-node setup' to try again.");
+                    // #11: actionable hint when the wizard hits an on-chain
+                    // gas ceiling. vm_status from the chain contains the
+                    // phrase "Out of gas" on OOG aborts; bumping the env
+                    // override is usually the fix until the code default
+                    // catches up with testnet gas drift.
+                    let msg = e.to_string();
+                    if msg.to_lowercase().contains("out of gas") {
+                        let current_max = std::env::var("DEADMKT_MAX_GAS")
+                            .unwrap_or_else(|_| "5000 (default)".into());
+                        eprintln!("\nThis looks like a gas ceiling hit. Try:");
+                        eprintln!("  DEADMKT_MAX_GAS=20000 deadmkt-node setup ...");
+                        eprintln!("  (current max_gas_amount: {})", current_max);
+                        eprintln!("If the error repeats at higher values, Supra testnet's gas");
+                        eprintln!("schedule may have drifted -- simulate the failing tx or");
+                        eprintln!("check a recent successful tx's gas_used to calibrate.");
+                    }
+                    eprintln!("\nYou can re-run 'deadmkt-node setup' to try again.");
                 }
             }
         }

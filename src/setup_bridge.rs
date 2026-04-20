@@ -157,13 +157,25 @@ pub struct SupraSetupClient {
 impl SupraSetupClient {
     pub fn new(rpc_urls: Vec<String>, contract_addr: String) -> Self {
         let parsed = parse_address(&contract_addr).unwrap_or([0u8; 32]);
+        // #12: env overrides apply at wizard time too (before config.json exists).
+        // Lets operators respond to testnet gas drift without rebuilding the image.
+        let max_gas_amount = std::env::var("DEADMKT_MAX_GAS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(5000);
+        let gas_unit_price = std::env::var("DEADMKT_GAS_PRICE")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(100000);
         Self {
             client: SupraClient::new(rpc_urls, contract_addr),
             contract_addr: parsed,
             signer: Mutex::new(None),
             chain_id: 6,          // Supra testnet default
-            max_gas_amount: 5000,
-            gas_unit_price: 100000,
+            max_gas_amount,
+            gas_unit_price,
         }
     }
 
