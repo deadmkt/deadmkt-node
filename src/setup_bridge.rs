@@ -162,7 +162,7 @@ impl SupraSetupClient {
             contract_addr: parsed,
             signer: Mutex::new(None),
             chain_id: 6,          // Supra testnet default
-            max_gas_amount: 200,
+            max_gas_amount: 5000,
             gas_unit_price: 100000,
         }
     }

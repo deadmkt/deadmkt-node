@@ -86,7 +86,7 @@ pub struct NodeConfig {
 fn default_strategy_port() -> u16 { 9090 }
 fn default_gossip_port() -> u16 { 9191 }
 fn default_chain_id() -> u8 { 6 } // Supra testnet
-fn default_max_gas() -> u64 { 200 }
+fn default_max_gas() -> u64 { 5000 }
 fn default_gas_price() -> u64 { 100000 }
 
 // =========================================================================
