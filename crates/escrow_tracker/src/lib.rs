@@ -18,6 +18,9 @@
 use std::collections::HashMap;
 use thiserror::Error;
 
+pub mod is_active_cache;
+pub use is_active_cache::IsActiveCache;
+
 // =========================================================================
 // Errors
 // =========================================================================
