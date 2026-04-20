@@ -992,7 +992,7 @@ pub async fn run_wizard(
         strategy_port: 9090,
         gossip_port: 9191,
         chain_id,
-        max_gas_amount: 200,
+        max_gas_amount: 5000,
         gas_unit_price: 100000,
         created_at: format!("{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()),
