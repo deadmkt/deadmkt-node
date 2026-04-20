@@ -161,6 +161,38 @@ pub fn spawn_worker(
             };
             drop(_guard); // Release tx lock before sending result
 
+            // #13c: spawn a verification task for successfully-submitted txs.
+            // submit_raw returns a tx_hash as soon as the RPC accepts the tx,
+            // but the tx may STILL abort on-chain (E_*_INACTIVE, etc). Without
+            // this, aborted settles are silent -- they never emit
+            // BatchTradeSettled so the node's event poller never picks them up,
+            // and the settle-abort counter (#13a) under-reports.
+            if let SettleResult::Submitted { ref tx_hash, ref match_hash } = result {
+                let client_owner = submitter.clone();
+                let result_tx_verify = result_tx.clone();
+                let tx_hash = tx_hash.clone();
+                let match_hash = match_hash.clone();
+                tokio::spawn(async move {
+                    // Let the tx get included before polling.
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let tx_res = client_owner.client().wait_for_tx(
+                        &tx_hash,
+                        std::time::Duration::from_secs(20),
+                    ).await;
+                    match tx_res {
+                        Ok(tr) if !tr.success => {
+                            let code = AbortCode::from_vm_status(&tr.vm_status)
+                                .unwrap_or(AbortCode::Other(0));
+                            let _ = result_tx_verify.send(SettleResult::Failed {
+                                match_hash,
+                                code,
+                            }).await;
+                        }
+                        _ => { /* success or timeout -- happy path / later retry */ }
+                    }
+                });
+            }
+
             // If the result channel is closed, the poll loop has shut down — exit
             if result_tx.send(result).await.is_err() {
                 eprintln!("[settle-worker] result channel closed, shutting down");
