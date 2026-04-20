@@ -1126,6 +1126,17 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let mut settle_aborts_since_report: u64 = 0;
     let mut last_settle_report_block: u64 = 0;
 
+    // #13b: liveness self-check. Periodically query escrow::is_active() and
+    // auto-attempt escrow::reactivate() if reaped. Default interval 50 batches;
+    // override via DEADMKT_LIVENESS_CHECK_INTERVAL (0 disables).
+    let liveness_check_interval: u64 = std::env::var("DEADMKT_LIVENESS_CHECK_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(50);
+    let mut liveness_consecutive_inactive: u32 = 0;
+    let mut liveness_auto_reactivate_attempts: u64 = 0;
+    let mut liveness_auto_reactivate_successes: u64 = 0;
+
     // SP8d: Health endpoint
     {
         let health_peers = gossip_peer_count.clone();
@@ -1443,6 +1454,70 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                         eprintln!("[heartbeat] WARNING: at risk of reap in ~{} batches",
                                             heartbeat_timeout.saturating_sub(est_missed));
                                     }
+                                }
+                            }
+                        }
+
+                        // ── #13b: Liveness self-check ──────────────────
+                        // Every liveness_check_interval batches (dispersed by
+                        // nft_id), query escrow::is_active. If false, try to
+                        // auto-reactivate via escrow::reactivate(). Operator-
+                        // grade recovery paths (insufficient escrow, past grace)
+                        // require manual `deadmkt-node reactivate`.
+                        if liveness_check_interval > 0
+                            && new_batch_id % liveness_check_interval
+                                == (config.nft_id % liveness_check_interval)
+                        {
+                            match check_is_active(&chain, config.nft_id).await {
+                                Some(true) => {
+                                    if liveness_consecutive_inactive > 0 {
+                                        println!("[liveness] recovered after {} consecutive inactive checks",
+                                            liveness_consecutive_inactive);
+                                    }
+                                    liveness_consecutive_inactive = 0;
+                                }
+                                Some(false) => {
+                                    liveness_consecutive_inactive += 1;
+                                    eprintln!("[liveness] CRITICAL: node is INACTIVE (nft_id={}, consecutive={})",
+                                        config.nft_id, liveness_consecutive_inactive);
+                                    liveness_auto_reactivate_attempts += 1;
+                                    match submit_reactivate(
+                                        &escrow_client,
+                                        &signing_key,
+                                        &config.contracts.escrow,
+                                        &config.trustee_address,
+                                        config.chain_id,
+                                        config.max_gas_amount,
+                                        config.gas_unit_price,
+                                    ).await {
+                                        Ok(hash) => {
+                                            match chain.wait_for_tx(&hash, Duration::from_secs(20)).await {
+                                                Ok(r) if r.success => {
+                                                    liveness_auto_reactivate_successes += 1;
+                                                    println!("[liveness] auto-reactivate succeeded ({})", hash);
+                                                }
+                                                Ok(r) => {
+                                                    let vs = r.vm_status.as_str();
+                                                    if vs.contains("E_INSUFFICIENT_ESCROW")
+                                                        || vs.contains("E_GRACE_NOT_MET")
+                                                    {
+                                                        eprintln!("[liveness] auto-reactivate rejected ({}) \u{2014} run `deadmkt-node reactivate` to mint-recover", vs);
+                                                    } else if vs.contains("E_HOLDING_EXPIRED") {
+                                                        eprintln!("[liveness] node is winding down (E_HOLDING_EXPIRED); use claim_all/rushed_withdrawal");
+                                                    } else if vs.contains("E_ALREADY_ACTIVE") {
+                                                        println!("[liveness] benign race: became active between view and tx");
+                                                    } else {
+                                                        eprintln!("[liveness] auto-reactivate failed: {}", vs);
+                                                    }
+                                                }
+                                                Err(e) => eprintln!("[liveness] auto-reactivate tx status check failed: {}", e),
+                                            }
+                                        }
+                                        Err(e) => eprintln!("[liveness] auto-reactivate submit failed: {}", e),
+                                    }
+                                }
+                                None => {
+                                    // RPC/view error -- skip this tick without changing state.
                                 }
                             }
                         }
@@ -1815,6 +1890,15 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             settle_aborts_since_report, since_str,
                         );
                     }
+                    // #13b: include liveness self-check counters when non-zero.
+                    if liveness_auto_reactivate_attempts > 0 {
+                        println!(
+                            "[liveness-stats] auto-reactivate attempts={} successes={} consecutive-inactive={}",
+                            liveness_auto_reactivate_attempts,
+                            liveness_auto_reactivate_successes,
+                            liveness_consecutive_inactive,
+                        );
+                    }
                     settle_aborts_since_report = 0;
                     last_settle_report_block = block;
                 }
@@ -2110,6 +2194,61 @@ async fn submit_heartbeat(
         max_gas_amount,
         gas_unit_price,
     ).map_err(|e| format!("heartbeat build failed: {:?}", e))?;
+
+    let tx_hash = client.submit_raw(&signed_tx).await?;
+    Ok(tx_hash)
+}
+
+/// Query `escrow::is_active(nft_id)` view. Returns Some(bool) on success,
+/// None on any RPC/parse error (caller treats as "skip this tick").
+async fn check_is_active(client: &SupraClient, nft_id: u64) -> Option<bool> {
+    match client.view_raw(
+        "escrow",
+        "is_active",
+        vec![],
+        vec![serde_json::json!(nft_id.to_string())],
+    ).await {
+        Ok(r) => r.get(0).and_then(|v| v.as_bool()),
+        Err(_) => None,
+    }
+}
+
+/// Submit `escrow::reactivate()` entry fn. Mirrors submit_heartbeat signature.
+async fn submit_reactivate(
+    client: &SupraClient,
+    signing_key: &SigningKey,
+    escrow_contract_addr: &str,
+    sender_addr: &str,
+    chain_id: u8,
+    max_gas_amount: u64,
+    gas_unit_price: u64,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let contract_addr = deadmkt_settlement::parse_address(escrow_contract_addr)
+        .map_err(|e| format!("invalid escrow contract address: {:?}", e))?;
+    let sender = deadmkt_settlement::parse_address(sender_addr)
+        .map_err(|e| format!("invalid sender address: {:?}", e))?;
+
+    let account = client.get_account(&format!("0x{}", hex::encode(sender))).await?;
+
+    let expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + 60;
+
+    let signed_tx = deadmkt_settlement::build_and_sign_entry_function(
+        signing_key,
+        sender,
+        contract_addr,
+        "escrow",
+        "reactivate",
+        vec![],
+        account.sequence_number,
+        expiry,
+        chain_id,
+        max_gas_amount,
+        gas_unit_price,
+    ).map_err(|e| format!("reactivate build failed: {:?}", e))?;
 
     let tx_hash = client.submit_raw(&signed_tx).await?;
     Ok(tx_hash)
