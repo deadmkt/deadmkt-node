@@ -13,7 +13,7 @@ use deadmkt_chain::client::SupraClient;
 use deadmkt_chain::types::{BatchEpoch, BatchParams};
 use deadmkt_config::NodeConfig;
 use deadmkt_crypto::{commit_hash, encode_order, sign_order, Order};
-use deadmkt_escrow_tracker::EscrowTracker;
+use deadmkt_escrow_tracker::{EscrowTracker, IsActiveCache};
 use deadmkt_gas_manager::GasManager;
 use deadmkt_gossip::messages::{self as gossip_messages, GossipMessage};
 use deadmkt_gossip::network::GossipNode;
@@ -1126,6 +1126,15 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let mut settle_aborts_since_report: u64 = 0;
     let mut last_settle_report_block: u64 = 0;
 
+    // #10 Path 1: is_active cache + stats. TTL 30s, max 10k entries.
+    // Consulted only by the gas_payer_nft_id node at settle submission;
+    // never used to alter the match list (would break consensus).
+    let mut is_active_cache = IsActiveCache::new(
+        std::time::Duration::from_secs(30),
+        10_000,
+    );
+    let mut filter_skipped_inactive: u64 = 0;
+
     // #13b: liveness self-check. Periodically query escrow::is_active() and
     // auto-attempt escrow::reactivate() if reaped. Default interval 50 batches;
     // override via DEADMKT_LIVENESS_CHECK_INTERVAL (0 disables).
@@ -1346,6 +1355,14 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                         // Re-add to unknown so we retry later
                                         gossip_validator.unknown_nfts.insert(nft_id);
                                     }
+                                }
+
+                                // #10: populate is_active cache eagerly for each
+                                // newly-seen peer. One extra view call per unique
+                                // NFT at discovery time; hit-rate near 100% for
+                                // all later settle-path lookups.
+                                if let Some(active) = check_is_active(&chain, nft_id).await {
+                                    is_active_cache.insert(nft_id, active);
                                 }
                             }
                             gossip_validator.last_pubkey_fetch_batch = new_batch_id;
@@ -1801,6 +1818,29 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                         }
 
                                         if is_gas_payer {
+                                            // #10 Path 1: skip submit if either counterparty
+                                            // is cached-inactive. Consensus-safe because only
+                                            // this node (gas payer) is gated on its local view.
+                                            let buyer_active = is_active_cache.get(m.buyer.order.nft_id);
+                                            let seller_active = is_active_cache.get(m.seller.order.nft_id);
+                                            let dead_nft = if buyer_active == Some(false) {
+                                                Some(m.buyer.order.nft_id)
+                                            } else if seller_active == Some(false) {
+                                                Some(m.seller.order.nft_id)
+                                            } else {
+                                                None
+                                            };
+                                            if let Some(dead) = dead_nft {
+                                                println!("[settle-filter] skipped {} \u{2014} nft={} inactive",
+                                                    &match_hash_hex[..12], dead);
+                                                let mut mgr = settlement_mgr.lock().unwrap();
+                                                mgr.register_skipped(
+                                                    &match_hash_hex,
+                                                    deadmkt_settlement::SkipReason::Inactive { nft_id: dead },
+                                                );
+                                                filter_skipped_inactive += 1;
+                                                continue;
+                                            }
                                             let req = SettleRequest {
                                                 match_data: m.clone(),
                                                 match_hash: match_hash_hex.clone(),
@@ -1897,6 +1937,17 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             liveness_auto_reactivate_attempts,
                             liveness_auto_reactivate_successes,
                             liveness_consecutive_inactive,
+                        );
+                    }
+                    // #10 Path 1: include settle-filter stats when non-zero.
+                    if filter_skipped_inactive > 0 {
+                        let (live_active, live_inactive) = is_active_cache.live_counts();
+                        println!(
+                            "[settle-filter] skipped-inactive={} cache: active={} inactive={} total={}",
+                            filter_skipped_inactive,
+                            live_active,
+                            live_inactive,
+                            is_active_cache.len(),
                         );
                     }
                     settle_aborts_since_report = 0;

@@ -781,6 +781,13 @@ pub struct PendingSettlement {
     pub created_at_batch: u64,
 }
 
+/// Reason a match was registered but never submitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Counterparty NFT was known-inactive at submit time (#10 Path 1).
+    Inactive { nft_id: u64 },
+}
+
 /// Manages in-flight settlements: tracking, confirmation, abort handling, backstop.
 ///
 /// Wires together SettlementSubmitter (4A) + EscrowTracker (4C).
@@ -797,6 +804,11 @@ pub struct SettlementManager {
     /// How many consecutive batches of >50% E_ALREADY_SETTLED to trigger.
     #[allow(dead_code)]
     isolation_threshold_batches: u32,
+    // ─── #10: matches skipped at submit time because a counterparty was
+    // cached-inactive. Lifetime counter for telemetry; last reason map for
+    // debug / strategy surfacing.
+    skipped_inactive_total: u64,
+    skipped_last: HashMap<String, SkipReason>,
 }
 
 impl SettlementManager {
@@ -811,7 +823,37 @@ impl SettlementManager {
             already_settled_count: 0,
             total_settlement_count: 0,
             isolation_threshold_batches: 5,
+            skipped_inactive_total: 0,
+            skipped_last: HashMap::new(),
         }
+    }
+
+    /// #10: record a match that was intentionally not submitted because the
+    /// counterparty was cached-inactive. Releases any escrow outflow that
+    /// register_match applied. Idempotent on match_hash.
+    pub fn register_skipped(
+        &mut self,
+        match_hash: &str,
+        reason: SkipReason,
+    ) {
+        // If we already called register_match for this hash, remove its
+        // pending entry and release the escrow outflow so projected() is
+        // restored. If we never registered it (the caller filtered BEFORE
+        // register_match), this is a no-op on pending and still records
+        // the skip for telemetry.
+        if self.pending.remove(match_hash).is_some() {
+            if let Ok(mut tracker) = self.tracker.lock() {
+                let _ = tracker.release_pending(match_hash);
+            }
+        }
+        self.skipped_inactive_total += 1;
+        self.skipped_last.insert(match_hash.to_string(), reason);
+    }
+
+    /// #10: lifetime count of matches skipped due to cached-inactive
+    /// counterparty. Used by the run-loop's [settle-stats] line.
+    pub fn skipped_inactive_total(&self) -> u64 {
+        self.skipped_inactive_total
     }
 
     /// Register a new match for settlement tracking.
@@ -1852,6 +1894,35 @@ mod tests {
 
         assert!(mgr.is_pending(&hash));
         assert_eq!(mgr.pending_count(), 1);
+    }
+
+    // ─── #10: register_skipped increments counter + releases outflow ────
+
+    #[test]
+    fn t_settle_30_register_skipped_after_register_match() {
+        let (mut mgr, tracker) = make_test_manager(42);
+        {
+            let mut t = tracker.lock().unwrap();
+            t.set_confirmed("KAY", 10_000);
+        }
+        let m = make_test_match();
+        let hash = hex::encode(m.match_hash);
+        mgr.register_match(m, true, 1000, 50, "EMM", "KAY", 5, 5).unwrap();
+        assert_eq!(tracker.lock().unwrap().projected("KAY"), 9_750);
+
+        mgr.register_skipped(&hash, SkipReason::Inactive { nft_id: 7 });
+        assert_eq!(mgr.skipped_inactive_total(), 1);
+        assert!(!mgr.is_pending(&hash), "pending should be cleared");
+        // Outflow released — full balance restored.
+        assert_eq!(tracker.lock().unwrap().projected("KAY"), 10_000);
+    }
+
+    #[test]
+    fn t_settle_31_register_skipped_without_prior_register() {
+        // Caller filtered before register_match — should still count.
+        let (mut mgr, _tracker) = make_test_manager(42);
+        mgr.register_skipped("ffff", SkipReason::Inactive { nft_id: 7 });
+        assert_eq!(mgr.skipped_inactive_total(), 1);
     }
 
     // ─── T_SETTLE_22: process_result Submitted → mark_submitted ───
