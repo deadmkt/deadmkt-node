@@ -1119,6 +1119,12 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     // SP8: Node health counters
     let mut uptime_batches: u64 = 0;
     let mut settle_failed_recent: u64 = 0;
+    // #13a: cumulative + windowed settle-abort counters for observability.
+    // Total never decays; windowed resets per report_interval for rate calc.
+    let mut settle_submits_total: u64 = 0;
+    let mut settle_aborts_total: u64 = 0;
+    let mut settle_aborts_since_report: u64 = 0;
+    let mut last_settle_report_block: u64 = 0;
 
     // SP8d: Health endpoint
     {
@@ -1748,6 +1754,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                         SettleResult::Submitted { match_hash, tx_hash } => {
                             let short = if match_hash.len() >= 12 { &match_hash[..12] } else { &match_hash };
                             mgr.mark_submitted(&match_hash, tx_hash.clone(), block);
+                            settle_submits_total += 1;
                             println!("[settle] submitted {} \u{2192} {}", short, tx_hash);
                         }
                         other => {
@@ -1760,7 +1767,16 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                 error_reason = error.clone();
                             }
                             if let SettleResult::Failed { ref code, .. } = other {
-                                error_reason = format!("{:?}", code);
+                                // #13a: Display impl gives the E_* name (e.g. E_BUYER_INACTIVE).
+                                error_reason = format!("{}", code);
+                                eprintln!("[settle-abort] WARN {} \u{2192} {}", short, code);
+                                settle_aborts_total += 1;
+                                settle_aborts_since_report += 1;
+                            }
+                            if let SettleResult::RpcError { ref error, .. } = other {
+                                eprintln!("[settle-abort] WARN {} rpc: {}", short, error);
+                                settle_aborts_total += 1;
+                                settle_aborts_since_report += 1;
                             }
 
                             // SP6c: Notify strategy of settlement failure
@@ -1780,6 +1796,27 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             }
                         }
                     }
+                }
+
+                // #13a: periodic settle-abort rate summary (every ~100 blocks)
+                if block >= last_settle_report_block + 100 {
+                    let rate_pct = if settle_submits_total > 0 {
+                        (settle_aborts_total as f64 / settle_submits_total as f64) * 100.0
+                    } else { 0.0 };
+                    let since_str = if last_settle_report_block == 0 {
+                        "since boot".to_string()
+                    } else {
+                        format!("in last {} blocks", block - last_settle_report_block)
+                    };
+                    if settle_submits_total > 0 || settle_aborts_total > 0 {
+                        println!(
+                            "[settle-stats] submits={} aborts={} ({:.1}% lifetime) | {} new aborts {}",
+                            settle_submits_total, settle_aborts_total, rate_pct,
+                            settle_aborts_since_report, since_str,
+                        );
+                    }
+                    settle_aborts_since_report = 0;
+                    last_settle_report_block = block;
                 }
 
                 // 8e. Poll for chain events (settlements, governance)
