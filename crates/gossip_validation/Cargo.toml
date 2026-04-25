@@ -1,0 +1,15 @@
+[package]
+name = "deadmkt-gossip-validation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deadmkt-crypto = { path = "../crypto" }
+deadmkt-gossip = { path = "../gossip" }
+deadmkt-chain = { path = "../chain" }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+bcs = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

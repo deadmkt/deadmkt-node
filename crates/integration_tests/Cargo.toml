@@ -1,0 +1,22 @@
+[package]
+name = "deadmkt-integration-tests"
+version = "0.1.0"
+edition = "2021"
+
+# This crate exists only for integration tests — no library code.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+deadmkt-crypto = { path = "../crypto" }
+deadmkt-matching = { path = "../matching" }
+deadmkt-chain = { path = "../chain" }
+deadmkt-gossip = { path = "../gossip" }
+deadmkt-gossip-validation = { path = "../gossip_validation" }
+deadmkt-batch-state = { path = "../batch_state" }
+deadmkt-storage = { path = "../storage" }
+tokio = { workspace = true }
+libp2p = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,26 @@
+[package]
+name = "deadmkt-setup"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deadmkt-config = { path = "../config" }
+deadmkt-keystore = { path = "../keystore" }
+deadmkt-crypto = { path = "../crypto" }
+deadmkt-chain = { path = "../chain" }
+deadmkt-storage = { path = "../storage" }
+tokio = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+sha3 = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+reqwest = { workspace = true }
+
+[features]
+integration = []

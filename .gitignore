@@ -1,0 +1,37 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# OS
+.DS_Store
+.DS_Store?
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+
+# Env / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Docker
+.docker/
+
+# Node data / runtime artifacts
+data/
+*.db
+*.sqlite
+*.sqlite3
+logs/
