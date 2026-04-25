@@ -368,23 +368,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_worker_simulation_abort() {
+    async fn spawn_worker_post_submit_abort() {
+        // #13c flow: submit succeeds, the spawned verify task polls the tx
+        // hash, observes status=Fail with vm_status carrying an abort code,
+        // and emits SettleResult::Failed with the parsed AbortCode.
         let server = MockServer::start().await;
         mount_account_mock(&server).await;
 
         Mock::given(method("POST"))
-            .and(path("/rpc/v3/transactions/simulate"))
+            .and(path("/rpc/v3/transactions/submit"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("\"0xabort_hash\""))
+            .mount(&server)
+            .await;
+
+        // wait_for_tx GETs /rpc/v3/transactions/{hash}?type=user. Return a
+        // failed tx with abort code 21 (BuyerOverfill) in the vm_status.
+        Mock::given(method("GET"))
+            .and(path("/rpc/v3/transactions/abort_hash"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "status": "Fail",
                 "output": { "Move": { "gas_used": 50, "vm_status": "Move abort in 0xDEAD::settlement: 21" } }
             })))
-            .mount(&server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path("/rpc/v3/transactions/submit"))
-            .respond_with(ResponseTemplate::new(500))
-            .expect(0)
             .mount(&server)
             .await;
 
@@ -401,8 +405,20 @@ mod tests {
             is_gas_payer: true,
         }).await.unwrap();
 
-        let result = result_rx.recv().await.unwrap();
-        match result {
+        // First result is Submitted (immediate after submit).
+        let first = result_rx.recv().await.unwrap();
+        match first {
+            SettleResult::Submitted { tx_hash, .. } => assert_eq!(tx_hash, "0xabort_hash"),
+            other => panic!("Expected Submitted first, got {:?}", other),
+        }
+
+        // Second result is Failed from the post-submit verify task.
+        // Verifier sleeps 3s before polling, plus polling time -> wait up to 10s.
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            result_rx.recv(),
+        ).await.expect("verifier should emit Failed within 10s").unwrap();
+        match second {
             SettleResult::Failed { code, .. } => assert_eq!(code, AbortCode::BuyerOverfill),
             other => panic!("Expected Failed, got {:?}", other),
         }
