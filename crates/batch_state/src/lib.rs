@@ -612,8 +612,8 @@ mod tests {
         let emm_buy = make_order(1, EMM_KAY, BUY, 50, 100);
         let emm_sell = make_order(2, EMM_KAY, SELL, 48, 100);
         let kay_tee = b"KAY/TEE";
-        let kay_tee_buy = make_order(3, btc, BUY, 60000, 10);
-        let kay_tee_sell = make_order(4, btc, SELL, 59000, 10);
+        let kay_tee_buy = make_order(3, kay_tee, BUY, 60000, 10);
+        let kay_tee_sell = make_order(4, kay_tee, SELL, 59000, 10);
 
         add_test_commit(&mut state, &emm_buy);
         add_test_commit(&mut state, &emm_sell);
@@ -634,13 +634,13 @@ mod tests {
         assert_eq!(state.match_count(), 2);
 
         let emm_kay_match = state.matches.iter().find(|m| m.symbol == EMM_KAY).unwrap();
-        let kay_tee_match = state.matches.iter().find(|m| m.symbol == btc).unwrap();
+        let kay_tee_match = state.matches.iter().find(|m| m.symbol == kay_tee).unwrap();
 
         assert_eq!(emm_kay_match.fill_quantity, 100);
         assert_eq!(emm_kay_match.settlement_price, 49);
 
-        assert_eq!(btc_match.fill_quantity, 10);
-        assert_eq!(btc_match.settlement_price, 59500);
+        assert_eq!(kay_tee_match.fill_quantity, 10);
+        assert_eq!(kay_tee_match.settlement_price, 59500);
     }
 
     // -- T_BS_12: Commit quota tracking --
