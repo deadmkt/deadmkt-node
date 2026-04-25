@@ -1290,7 +1290,7 @@ mod tests {
         let args = build_settle_args(&m).unwrap();
         let symbol: Vec<u8> = bcs::from_bytes(&args[16]).unwrap();
         assert_eq!(symbol, b"EMM/KAY".to_vec());
-        assert_eq!(symbol.len(), 10);
+        assert_eq!(symbol.len(), 7); // "EMM/KAY" — 7 ASCII bytes
     }
 
     // ─── T_SETTLE_03: estimate_gas success (wiremock) ─────────────
