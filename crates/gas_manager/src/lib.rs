@@ -81,6 +81,15 @@ impl GasManager {
         }
     }
 
+    /// GP1: convenience predicate. Returns false when the current balance is
+    /// below the critical threshold. NOTE: this does NOT implement hysteresis
+    /// on its own -- callers that want to avoid pause/resume flapping should
+    /// track their own pause state and clear it only when balance reaches
+    /// Normal (above the warn threshold). See `gas-pause.md` design notes.
+    pub fn should_trade(&self) -> bool {
+        self.check_status() != GasStatus::Critical
+    }
+
     /// Update balance (e.g. from chain read). Returns previous and new status.
     pub fn update_balance(&mut self, new_balance: u64) -> (GasStatus, GasStatus) {
         let old_status = self.check_status();
@@ -206,6 +215,29 @@ mod tests {
         let gm = GasManager::new(DECIMALS);
         assert_eq!(gm.check_status(), GasStatus::Critical);
         assert_eq!(gm.balance(), 0);
+    }
+
+    // ── T_GAS_08 (GP1): should_trade — true at Normal/Low, false at Critical
+
+    #[test]
+    fn t_gas_08_should_trade() {
+        let mut gm = GasManager::new(DECIMALS);
+
+        // Normal
+        gm.update_balance(50 * SUPRA);
+        assert!(gm.should_trade(), "Normal balance should allow trading");
+
+        // Low (above critical, below warn)
+        gm.update_balance(5 * SUPRA);
+        assert!(gm.should_trade(), "Low balance should still allow trading");
+
+        // Critical
+        gm.update_balance(SUPRA / 2);
+        assert!(!gm.should_trade(), "Critical balance should block trading");
+
+        // Recover
+        gm.update_balance(50 * SUPRA);
+        assert!(gm.should_trade(), "Recovered balance should allow trading");
     }
 
     // ── Extra: exact threshold boundary
