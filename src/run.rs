@@ -1004,6 +1004,9 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let last_block_health = last_block_shared.clone();
     let mut last_phase = phase;
     let mut last_batch_id = batch_id;
+    // SP4: track the last batch we already sent BatchStart for, so the
+    // per-block COMMIT phase handler does not re-fire it every block.
+    let mut last_batch_start_sent: u64 = 0;
     let mut last_new_block_time = std::time::Instant::now();
     // Stall detection moved to poller task (SP3)
 
@@ -1646,9 +1649,15 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                 // Refresh mint state every batch so strategy sees pending claims
                                 mint_state = fetch_mint_state(&chain, &config.trustee_address).await;
 
-                                let _ = strategy_server.send_event(StrategyEvent::BatchStart {
-                                    data: make_batch_start(new_batch_id, pool_id, &params, num_pools, &esc_proj2, &esc_conf2, &wallet_balances, &gas_manager.balance_display(), peers2, &last_batch_data, pending_setts2, Some(health2), &mint_state, &circulating, &vault_locks, global_min_trade),
-                                }).await;
+                                // SP4: only send BatchStart once per batch. The COMMIT phase
+                                // spans multiple blocks; without this guard, strategy would
+                                // receive a fresh BatchStart on every block during COMMIT.
+                                if new_batch_id > last_batch_start_sent {
+                                    let _ = strategy_server.send_event(StrategyEvent::BatchStart {
+                                        data: make_batch_start(new_batch_id, pool_id, &params, num_pools, &esc_proj2, &esc_conf2, &wallet_balances, &gas_manager.balance_display(), peers2, &last_batch_data, pending_setts2, Some(health2), &mint_state, &circulating, &vault_locks, global_min_trade),
+                                    }).await;
+                                    last_batch_start_sent = new_batch_id;
+                                }
 
                                 match strategy_server.receive_action_with_timeout(
                                     Duration::from_secs(3)
