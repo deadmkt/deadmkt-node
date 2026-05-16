@@ -1007,6 +1007,11 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     // SP4: track the last batch we already sent BatchStart for, so the
     // per-block COMMIT phase handler does not re-fire it every block.
     let mut last_batch_start_sent: u64 = 0;
+    // GP1: trading-pause state. Set true when gas hits Critical; cleared
+    // only when gas recovers to Normal (hysteresis -- staying paused
+    // through Low avoids flapping near the critical line).
+    let mut trading_paused: bool = false;
+    let mut paused_since_batch: u64 = 0;
     let mut last_new_block_time = std::time::Instant::now();
     // Stall detection moved to poller task (SP3)
 
@@ -1582,6 +1587,34 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             my_pool = new_pool;
                         }
 
+                        // GP1: gas-aware trading pause with hysteresis.
+                        // Pause when gas drops to Critical; resume only when gas
+                        // recovers all the way to Normal (above warn threshold).
+                        // Staying paused through Low avoids flapping near the
+                        // critical line.
+                        let gas_status = gas_manager.check_status();
+                        if !trading_paused && gas_status == deadmkt_gas_manager::GasStatus::Critical {
+                            trading_paused = true;
+                            paused_since_batch = new_batch_id;
+                            eprintln!(
+                                "[gas-pause] Trading paused: gas balance {} SUPRA (Critical). Not submitting commits or reveals for batch {}.",
+                                gas_manager.balance_display(), new_batch_id
+                            );
+                        } else if trading_paused && gas_status == deadmkt_gas_manager::GasStatus::Normal {
+                            println!(
+                                "[gas-pause] Trading resumed: gas balance {} SUPRA. Resuming commits at batch {} (paused since batch {}).",
+                                gas_manager.balance_display(), new_batch_id, paused_since_batch
+                            );
+                            trading_paused = false;
+                            paused_since_batch = 0;
+                        } else if trading_paused {
+                            // Still paused -- log once per batch with current balance.
+                            eprintln!(
+                                "[gas-pause] Still paused at batch {}: gas balance {} SUPRA (paused since batch {}). Waiting for gas top-up.",
+                                new_batch_id, gas_manager.balance_display(), paused_since_batch
+                            );
+                        }
+
                         // BatchStart sent only in COMMIT phase handler below.
                     }
 
@@ -1617,11 +1650,12 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                 }
                             }
 
-                            let gas_ok = gas_manager.check_status() != deadmkt_gas_manager::GasStatus::Critical;
-                            let can_commit = node_state.state() == NodeState::Trading && gas_ok;
-                            if !gas_ok {
-                                eprintln!("[commit] SKIPPED — gas critical ({})", gas_manager.balance_display());
-                            }
+                            // GP1: use the stateful trading_paused flag (hysteresis-aware)
+                            // instead of a raw check_status() call. This avoids resuming
+                            // on the first Critical->Low transition before gas is truly safe.
+                            let can_commit = node_state.state() == NodeState::Trading && !trading_paused;
+                            // Note: the per-batch [gas-pause] log already announces the pause
+                            // at batch boundary; no need for an additional [commit] SKIPPED line.
                             let orders = if can_commit && strategy_server.is_connected() {
                                 let pool_id = orchestrator.batch_state.current_pool_id(config.nft_id);
                                 let (esc_proj2, esc_conf2) = build_escrow_views(&_tracker, &token_decimals);
@@ -1706,8 +1740,12 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
 
                             let my_commits = orchestrator.published_commits.len();
 
-                            // SP6a: Send reveal_start to strategy, allow selective reveal
-                            let strategy_indices = if my_commits > 0 && strategy_server.is_connected() {
+                            // SP6a: Send reveal_start to strategy, allow selective reveal.
+                            // GP1: skip the strategy interaction entirely when paused -- we
+                            // wouldn't have submitted commits in COMMIT phase, so there is
+                            // nothing to reveal. The !trading_paused guard makes the intent
+                            // explicit and avoids prompting strategy for an empty action.
+                            let strategy_indices = if !trading_paused && my_commits > 0 && strategy_server.is_connected() {
                                 let commit_summaries: Vec<String> = orchestrator.published_commits
                                     .iter().map(|c| hex::encode(&c.commit_hash)).collect();
                                 let reveal_event = StrategyEvent::RevealStart {
