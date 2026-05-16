@@ -886,7 +886,11 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     // and settlement worker (both submit from the same address).
     let tx_lock = Arc::new(tokio::sync::Mutex::new(()));
 
-    let _token_worker_handle = {
+    // SP10: build the token-submitting client once and share it via Arc.
+    // token_worker takes one clone for processing strategy actions; the
+    // SP10 auto-claim task takes another clone to submit claim_mint when
+    // a pending hold period expires while the node is running.
+    let token_client_arc: Arc<dyn deadmkt_setup::ChainClient> = {
         let mut token_client = crate::setup_bridge::SupraSetupClient::new(
             config.rpc_urls.clone(),
             config.contracts.settlement.clone(), // all modules at same address
@@ -897,16 +901,77 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
             signing_key.verifying_key().as_bytes(),
             &config.trustee_address,
         );
+        Arc::new(token_client)
+    };
+
+    let _token_worker_handle = {
         let token_rx = strategy_server.take_token_action_rx().await
             .expect("token_action_rx already taken");
         crate::token_worker::spawn_token_worker(
-            Arc::new(token_client),
+            Arc::clone(&token_client_arc),
             token_rx,
             strategy_server.event_sender(),
             tx_lock.clone(),
         )
     };
     println!("  Tokens:   worker started");
+
+    // SP10: pending mint awareness + startup recovery.
+    // If chain shows a pending mint for this trustee, log full details
+    // (amounts + countdown + claimable_at). If the hold has already
+    // expired, claim immediately; otherwise spawn a one-shot task that
+    // sleeps until claimable_at and submits claim_mint.
+    if let Some(pm) = fetch_pending_mint_full(&chain, &config.trustee_address).await {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let remaining = pm.claimable_at as i64 - now_secs as i64;
+        let fmt_token = |raw: u64| -> String {
+            let d = *token_decimals.get("EMM").unwrap_or(&5u8) as u32;
+            let factor = 10u64.pow(d);
+            format!("{}.{:0>width$}", raw / factor, raw % factor, width = d as usize)
+        };
+        println!(
+            "  Mint:     pending {} EMM + {} KAY + {} TEE (cost {} SUPRA)",
+            fmt_token(pm.m_amount), fmt_token(pm.k_amount), fmt_token(pm.t_amount),
+            pm.supra_cost as f64 / 1e8
+        );
+        if remaining <= 0 {
+            println!(
+                "  Mint:     hold expired ({}s ago) -- will auto-claim shortly",
+                -remaining
+            );
+        } else {
+            println!(
+                "  Mint:     claimable in {} (at unix {})",
+                sp10_format_duration(remaining as u64), pm.claimable_at
+            );
+        }
+        // Spawn auto-claim task. Sleep duration clamps to 0 if hold expired.
+        let auto_claim_client = Arc::clone(&token_client_arc);
+        let auto_claim_lock = tx_lock.clone();
+        let sleep_secs: u64 = if remaining > 0 { remaining as u64 } else { 0 };
+        tokio::spawn(async move {
+            if sleep_secs > 0 {
+                tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+            }
+            let _g = auto_claim_lock.lock().await;
+            match auto_claim_client.submit_claim_mint().await {
+                Ok(r) if r.success => {
+                    println!("[mint] Auto-claim succeeded (gas={}). Tokens deposited to escrow.", r.gas_used);
+                    // SP10 success criterion 11: if the NFT was inactive due to
+                    // heartbeat reap, the deposit reactivates it. Note this for
+                    // operator awareness.
+                    println!("[mint] If NFT was inactive, the deposit just reactivated heartbeat.");
+                }
+                Ok(r) => eprintln!("[mint] Auto-claim FAILED: {}", r.vm_status),
+                Err(e) => eprintln!("[mint] Auto-claim ERROR: {}", e),
+            }
+        });
+    } else {
+        println!("  Mint:     no pending mint. Ready for next mint cycle.");
+    }
 
     // ── 7. Subsystem construction ────────────────────────────────────
     let mut node_state = NodeStateMachine::new();
@@ -2792,6 +2857,70 @@ async fn fetch_mint_state(
         block_end,
         has_pending_mint: has_pending,
         pending_claimable_at: claimable_at,
+    }
+}
+
+/// SP10: full pending-mint snapshot for startup display + auto-claim scheduling.
+/// Returns None when the trustee has no pending mint on-chain.
+#[derive(Debug, Clone)]
+struct PendingMintFull {
+    m_amount: u64,
+    k_amount: u64,
+    t_amount: u64,
+    supra_cost: u64,
+    claimable_at: u64,
+}
+
+async fn fetch_pending_mint_full(
+    chain: &deadmkt_chain::client::SupraClient,
+    trustee_address: &str,
+) -> Option<PendingMintFull> {
+    let resp = chain.view_raw(
+        "tokens", "get_pending_mint", vec![],
+        vec![serde_json::json!(trustee_address)],
+    ).await.ok()?;
+
+    // Supra returns Option<PendingMint> as {"vec": [{struct}]} or {"vec": []}.
+    // Pick the struct out of the Option wrapper; tolerate the non-Option shape too.
+    let pm = resp.get(0)
+        .and_then(|v| v.get("vec"))
+        .and_then(|v| v.get(0))
+        .or_else(|| resp.get(0))?;
+
+    let read_u64 = |k: &str| -> u64 {
+        pm.get(k)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+
+    let claimable_at = read_u64("claimable_at");
+    if claimable_at == 0 {
+        // No real pending mint (empty Option case).
+        return None;
+    }
+
+    Some(PendingMintFull {
+        m_amount: read_u64("m_amount"),
+        k_amount: read_u64("k_amount"),
+        t_amount: read_u64("t_amount"),
+        supra_cost: read_u64("supra_cost"),
+        claimable_at,
+    })
+}
+
+/// SP10: format a duration in seconds as "Nd Nh Nm" (truncated to minutes
+/// for human readability over the multi-day hold periods).
+fn sp10_format_duration(secs: u64) -> String {
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    if days > 0 {
+        format!("{}d {}h {}m", days, hours, mins)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{}m", mins.max(1))
     }
 }
 
