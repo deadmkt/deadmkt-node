@@ -712,6 +712,9 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
 
     let _gossip_task = tokio::spawn(async move {
         let mut drop_count: u64 = 0;
+        // SP9: track InsufficientPeers occurrences per pool so we can
+        // categorise expected mesh-formation noise vs real publish failures.
+        let mut insufficient_peers_count: u64 = 0;
         let mut redial_interval = tokio::time::interval(Duration::from_secs(60));
         redial_interval.tick().await; // skip first immediate tick
 
@@ -759,18 +762,62 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                 Some(cmd) = swarm_cmd_rx.recv() => {
                     match cmd {
                         SwarmCommand::Publish { pool_id, msg } => {
-                            if let Err(e) = gossip_node.publish_to_pool(pool_id, &msg) {
-                                eprintln!("[gossip-task] publish error: {}", e);
+                            match gossip_node.publish_to_pool(pool_id, &msg) {
+                                Ok(_) => {
+                                    // SP9 Change 3: if we were in a mesh-forming
+                                    // window, announce the recovery so operators
+                                    // can distinguish "settled in" from real issues.
+                                    if insufficient_peers_count > 0 {
+                                        eprintln!(
+                                            "[gossip-task] mesh formed on pool {} after {} InsufficientPeers",
+                                            pool_id, insufficient_peers_count
+                                        );
+                                        insufficient_peers_count = 0;
+                                    }
+                                }
+                                Err(e) => {
+                                    let err_str = format!("{}", e);
+                                    if err_str.contains("InsufficientPeers") {
+                                        // Expected during pool transitions -- mesh
+                                        // is still forming. Rate-limit to avoid spam:
+                                        // log on first occurrence and every 50th.
+                                        insufficient_peers_count += 1;
+                                        if insufficient_peers_count == 1
+                                            || insufficient_peers_count % 50 == 0
+                                        {
+                                            eprintln!(
+                                                "[gossip-task] InsufficientPeers on pool {} (count={}, mesh forming)",
+                                                pool_id, insufficient_peers_count
+                                            );
+                                        }
+                                    } else {
+                                        eprintln!(
+                                            "[gossip-task] publish error on pool {}: {}",
+                                            pool_id, e
+                                        );
+                                    }
+                                }
                             }
                         }
                         SwarmCommand::SubscribePool(pool_id) => {
-                            if let Err(e) = gossip_node.subscribe_pool(pool_id) {
-                                eprintln!("[gossip-task] subscribe error for pool {}: {}", pool_id, e);
+                            match gossip_node.subscribe_pool(pool_id) {
+                                Ok(_) => eprintln!("[gossip-task] subscribed to pool {}", pool_id),
+                                Err(e) => eprintln!(
+                                    "[gossip-task] FAILED to subscribe to pool {}: {}",
+                                    pool_id, e
+                                ),
                             }
                         }
                         SwarmCommand::UnsubscribePool(pool_id) => {
-                            if let Err(e) = gossip_node.unsubscribe_pool(pool_id) {
-                                eprintln!("[gossip-task] unsubscribe error for pool {}: {}", pool_id, e);
+                            match gossip_node.unsubscribe_pool(pool_id) {
+                                Ok(_) => eprintln!(
+                                    "[gossip-task] unsubscribed from pool {}",
+                                    pool_id
+                                ),
+                                Err(e) => eprintln!(
+                                    "[gossip-task] FAILED to unsubscribe from pool {}: {}",
+                                    pool_id, e
+                                ),
                             }
                         }
                     }
@@ -1309,8 +1356,15 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                         continue;
                     }
 
-                    println!("[block {}] batch={} phase={} (was batch={} phase={})",
-                             block, new_batch_id, new_phase, last_batch_id, last_phase);
+                    // SP9 Change 4: enrich phase/batch transition log with pool
+                    // context (pool=my/total) and current peer count so each line
+                    // is a self-contained snapshot of pool health.
+                    let _sp9_peers = gossip_peer_count.load(Ordering::Relaxed);
+                    println!(
+                        "[block {}] batch={} phase={} pool={}/{} peers={} (was batch={} phase={})",
+                        block, new_batch_id, new_phase, my_pool, num_pools, _sp9_peers,
+                        last_batch_id, last_phase
+                    );
 
                     // New batch boundary
                     if new_batch_id != last_batch_id {
@@ -1395,13 +1449,37 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                         }
 
                         // Re-fetch pool count (mitosis may have split/merged)
-                        if let Ok(new_num_pools) = fetch_num_pools(
+                        match fetch_num_pools(
                             &pool_config_client, &config.contracts.pool_config
                         ).await {
-                            if new_num_pools != num_pools {
-                                println!("[pools] {} -> {} pools", num_pools, new_num_pools);
-                                num_pools = new_num_pools;
-                                orchestrator.batch_state.set_num_pools(num_pools);
+                            Ok(new_num_pools) => {
+                                if new_num_pools != num_pools {
+                                    // SP9 Change 1: enriched topology-change log
+                                    println!(
+                                        "[pools] topology change: {} -> {} pools (batch={})",
+                                        num_pools, new_num_pools, new_batch_id
+                                    );
+                                    num_pools = new_num_pools;
+                                    orchestrator.batch_state.set_num_pools(num_pools);
+                                    // Recompute my assignment under the new topology
+                                    // and log it explicitly so operators see where
+                                    // this node landed.
+                                    let assigned = compute_pool_assignment(
+                                        config.nft_id, new_batch_id, num_pools.max(1)
+                                    );
+                                    println!(
+                                        "[pools] my assignment: pool {} (nft_id={}, batch={})",
+                                        assigned, config.nft_id, new_batch_id
+                                    );
+                                }
+                            }
+                            // SP9 Change 6: log stale-data warning. Previously the
+                            // err branch was silently swallowed by `if let Ok`.
+                            Err(e) => {
+                                eprintln!(
+                                    "[pools] WARNING: fetch_num_pools RPC failed, using stale num_pools={} (may be incorrect): {}",
+                                    num_pools, e
+                                );
                             }
                         }
 
@@ -1582,8 +1660,28 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             config.nft_id, new_batch_id, orchestrator.batch_state.num_pools().max(1)
                         );
                         if new_pool != my_pool {
-                            let _ = swarm_cmd_tx.try_send(SwarmCommand::UnsubscribePool(my_pool));
-                            let _ = swarm_cmd_tx.try_send(SwarmCommand::SubscribePool(new_pool));
+                            // SP9 Change 1: log the per-batch reassignment so the operator
+                            // can see when the node moves between pools.
+                            println!(
+                                "[pools] reassigned: pool {} -> pool {} (batch={})",
+                                my_pool, new_pool, new_batch_id
+                            );
+                            // SP9 Change 5: replace silent `let _ =` with explicit error
+                            // reporting. A dropped subscribe/unsubscribe means the node
+                            // will miss an entire batch's gossip on that pool topic --
+                            // worth a CRITICAL-tagged line.
+                            if let Err(e) = swarm_cmd_tx.try_send(SwarmCommand::UnsubscribePool(my_pool)) {
+                                eprintln!(
+                                    "[pools] CRITICAL: failed to send unsubscribe for pool {} (batch={}): {} (channel full?)",
+                                    my_pool, new_batch_id, e
+                                );
+                            }
+                            if let Err(e) = swarm_cmd_tx.try_send(SwarmCommand::SubscribePool(new_pool)) {
+                                eprintln!(
+                                    "[pools] CRITICAL: failed to send subscribe for pool {} (batch={}): {} (channel full?)",
+                                    new_pool, new_batch_id, e
+                                );
+                            }
                             my_pool = new_pool;
                         }
 
