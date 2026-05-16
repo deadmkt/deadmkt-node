@@ -903,4 +903,96 @@ mod tests {
         assert_eq!(phase2, Phase::Reveal);
         assert!(is_phase_boundary(info1.block_height, info2.block_height, &epoch, &params));
     }
+
+    // T_SP2_01: HTML rate-limit page surfaces as RateLimited, not deserialization error
+    #[tokio::test]
+    async fn test_sp2_01_rate_limited_html_response() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rpc/v2/block"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<html>error 1015</html>"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = SupraClient::new(vec![mock_server.uri()], "0xDEADMKT".into());
+        let err = client.get_ledger_info().await.unwrap_err();
+        assert!(matches!(err, ChainError::RateLimited { status: 403 }));
+        assert!(err.is_rate_limited());
+    }
+
+    // T_SP2_02: HTTP 429 surfaces as RateLimited
+    #[tokio::test]
+    async fn test_sp2_02_rate_limited_429() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rpc/v2/block"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&mock_server)
+            .await;
+
+        let client = SupraClient::new(vec![mock_server.uri()], "0xDEADMKT".into());
+        let err = client.get_ledger_info().await.unwrap_err();
+        assert!(err.is_rate_limited());
+        assert!(matches!(err, ChainError::RateLimited { status: 429 }));
+    }
+
+    // T_SP2_03: view_absolute retries on a rate-limited endpoint and succeeds on the next attempt
+    #[tokio::test]
+    async fn test_sp2_03_view_retries_on_rate_limit() {
+        let mock_server = MockServer::start().await;
+
+        // First call: rate-limited (consumed once)
+        Mock::given(method("POST"))
+            .and(path("/rpc/v2/view"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<html>error 1015</html>"),
+            )
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        // Subsequent calls: success
+        Mock::given(method("POST"))
+            .and(path("/rpc/v2/view"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": ["42"]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = SupraClient::new(vec![mock_server.uri()], "0xDEADMKT".into());
+        let result = client
+            .view_raw("test", "fn", vec![], vec![])
+            .await
+            .unwrap();
+        assert_eq!(result[0].as_str().unwrap(), "42");
+    }
+
+    // T_SP2_04: get_events rate-limit detection
+    #[tokio::test]
+    async fn test_sp2_04_events_rate_limited() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/rpc/v3/events/.*"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<html>rate limited</html>"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = SupraClient::new(vec![mock_server.uri()], "0xDEADMKT".into());
+        let err = client
+            .get_events("0xDEAD::test::Event", 0, 100, 25)
+            .await
+            .unwrap_err();
+        assert!(err.is_rate_limited());
+    }
 }
