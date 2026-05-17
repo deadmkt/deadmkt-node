@@ -515,6 +515,147 @@ pub async fn run_setup_noninteractive_fresh(
     run_setup_after_keystore(v, address, public, secret, chain, data_dir, result).await
 }
 
+/// MR1c: restore-from-backup entry point. No setup.json -- the operator
+/// dropped their backed-up `keystore.json` into the data directory and
+/// ran the node. We prompt for the keystore password, unlock the keys,
+/// query the chain for the trustee's NFT + beneficiary + escrow state,
+/// and reconstruct `config.json` from network defaults plus the chain's
+/// answers. **The trustee's only backup responsibility is keystore.json
+/// + password.** Everything else is recoverable from chain state.
+///
+/// Returns a SetupResult tagged `mode: restore`. The caller writes JSON
+/// to stdout and exits; the operator runs `deadmkt-node` again to begin
+/// trading with the newly-written config.
+///
+/// On-chain branches:
+///   - NFT + registered + escrow > 0 → write config, success
+///   - NFT + registered, escrow empty → write config + warning (operator
+///     can request a mint via strategy / `deadmkt-node deposit`)
+///   - NFT exists, NOT registered → write config + warning (operator
+///     should run interactive setup / supply a setup.json)
+///   - No NFT for this address → error: this keystore has never minted;
+///     can't restore -- need beneficiary address (use MR1a fresh setup
+///     instead)
+///   - Heartbeat reaped → write config + warning suggesting
+///     `deadmkt-node reactivate`. The node's own #13b liveness check
+///     will also attempt auto-reactivate on startup.
+pub async fn run_setup_noninteractive_restore(
+    keystore_password: &str,
+    network: deadmkt_config::Network,
+    chain: &dyn crate::ChainClient,
+    data_dir: &std::path::Path,
+) -> SetupResult {
+    let network_str = match network {
+        deadmkt_config::Network::Testnet => "testnet",
+        deadmkt_config::Network::Mainnet => "mainnet",
+    };
+    let mut result = SetupResult::fresh_in_progress(network_str, "trading")
+        .with_mode(SetupMode::Restore);
+
+    // 1. Unlock keystore -----------------------------------------------------
+    let keystore_path = data_dir.join("keystore.json");
+    let (address, public, secret) = match unlock_existing_keystore(
+        &keystore_path, keystore_password,
+    ) {
+        Ok(t) => t,
+        Err(e) => return result.fail("unlock_keystore", e),
+    };
+    result.trustee_address = Some(address.clone());
+    result.steps_performed.push("unlock_keystore".into());
+    eprintln!("[restore] Keystore unlocked. Trustee address: {}", address);
+
+    // 2. Set chain signer (needed if we ever submit a tx -- restore mainly
+    // reads, but having the signer set keeps the client consistent) -------
+    chain.set_signer(secret.as_bytes(), public.as_bytes(), &address);
+
+    // 3. Chain state verification -------------------------------------------
+    let nft_id = match crate::check_existing_nft(chain, &address).await {
+        Ok(crate::ExistingNft::Found { nft_id, beneficiary }) => {
+            result.beneficiary_address = Some(beneficiary.clone());
+            eprintln!(
+                "[restore] On-chain: NFT #{} owned, beneficiary {}",
+                nft_id, beneficiary
+            );
+            nft_id
+        }
+        Ok(crate::ExistingNft::NotFound) => {
+            return result.fail(
+                "check_existing_nft",
+                "no NFT on-chain for this keystore -- a restore needs an already-minted NFT (beneficiary is read from chain). Use MR1a fresh setup with a setup.json to mint a new NFT against a chosen beneficiary."
+            );
+        }
+        Err(e) => return result.fail("check_existing_nft", e),
+    };
+    result.nft_id = Some(nft_id);
+    result.steps_performed.push("check_existing_nft".into());
+
+    // 4. Escrow + registration snapshot -------------------------------------
+    let token_metas = network_token_metadata_addresses(&network);
+    let mut balances = EscrowBalances::default();
+    let mut any_balance = false;
+    for (sym, meta) in &token_metas {
+        match chain.get_escrow_balance(nft_id, meta).await {
+            Ok(bal) => {
+                if bal > 0 { any_balance = true; }
+                match sym.as_str() {
+                    "EMM" => balances.emm = bal,
+                    "KAY" => balances.kay = bal,
+                    "TEE" => balances.tee = bal,
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                result.warnings.push(format!(
+                    "get_escrow_balance({}) failed: {} -- restore continues without escrow snapshot",
+                    sym, e
+                ));
+                // Don't abort restore -- escrow read failure shouldn't block
+                // config reconstruction.
+                break;
+            }
+        }
+    }
+    result.escrow_balances = Some(balances);
+    result.steps_performed.push("read_escrow".into());
+    if !any_balance {
+        result.warnings.push(
+            "escrow is empty -- if the NFT was previously trading this likely means tokens were withdrawn or the heartbeat lapsed. Trading will start with no inventory; request a mint via your strategy or `deadmkt-node deposit`.".to_string(),
+        );
+    } else {
+        eprintln!("[restore] On-chain escrow has tokens -- ready to trade.");
+    }
+
+    // 5. Reconstruct config from network defaults ---------------------------
+    let beneficiary_address = result.beneficiary_address.clone().unwrap_or_default();
+    let v = ValidatedSetupConfig {
+        network: network.clone(),
+        beneficiary_address: beneficiary_address.clone(),
+        bootstrap_only: false,
+        mint_amounts: MintAmounts::default(),
+        withdrawal_rules: WithdrawalRules::default(),
+        faucet: FaucetCfg::default(),
+    };
+    let config_path = data_dir.join("config.json");
+    if config_path.exists() {
+        result.warnings.push(format!(
+            "config.json already exists at {} -- it will be overwritten with the restored snapshot",
+            config_path.display()
+        ));
+    }
+    let node_config = build_node_config_from_chain(&v, nft_id, &address);
+    if let Err(e) = node_config.save(&config_path) {
+        return result.fail("write_config", e);
+    }
+    result.steps_performed.push("write_config".into());
+    eprintln!(
+        "[restore] Wrote config.json -> {}. Run `deadmkt-node` again to start trading.",
+        config_path.display()
+    );
+
+    result.success = true;
+    result
+}
+
 /// MR1b: LLM-assisted entry point. Keystore is already on disk; the
 /// password was prompted at the CLI boundary (so the LLM that wrote
 /// setup.json never saw it). Validates the config (rejects if it
@@ -661,8 +802,45 @@ async fn run_setup_after_keystore(
         }
     }
 
-    // 8. Build + write config.json ------------------------------------------
-    // Mirror the construction pattern used in `run_wizard` (see lib.rs:988+).
+    // 8. Build + write config.json (shared helper used by MR1a/b/c) --------
+    let node_config = build_node_config_from_chain(&v, nft_id, &address);
+
+    if let Err(e) = node_config.save(&config_path) {
+        return result.fail("write_config", e);
+    }
+    result.steps_performed.push("write_config".into());
+    eprintln!("[setup] Wrote config.json -> {}", config_path.display());
+
+    // 9. Final escrow snapshot for the JSON output --------------------------
+    if !v.bootstrap_only {
+        match chain.get_all_balances(&address).await {
+            Ok(b) => {
+                // wallet balances (post auto-mint they should be 0 -- everything
+                // went to escrow). Skip; just record gas.
+                result.gas_balance_supra = Some(b.supra);
+            }
+            Err(e) => {
+                result.warnings.push(format!("final balance fetch failed: {}", e));
+            }
+        }
+    }
+
+    result.success = true;
+    result
+}
+
+// =========================================================================
+// Shared helpers (used by fresh/llm-assisted/restore)
+// =========================================================================
+
+/// Build a `NodeConfig` from network defaults + the chain-confirmed
+/// trustee data. Used by all three non-interactive entry points so
+/// they produce identical config.json shapes for the same trustee.
+pub fn build_node_config_from_chain(
+    v: &ValidatedSetupConfig,
+    nft_id: u64,
+    trustee_address: &str,
+) -> deadmkt_config::NodeConfig {
     let contracts = deadmkt_config::default_contract_addresses(&v.network);
     let rpc_urls = match v.network {
         deadmkt_config::Network::Testnet => vec!["https://rpc-testnet.supra.com".to_string()],
@@ -685,11 +863,11 @@ async fn run_setup_after_keystore(
         ],
     };
     let auth_token = deadmkt_config::generate_strategy_auth_token();
-    let node_config = deadmkt_config::NodeConfig {
+    deadmkt_config::NodeConfig {
         network: v.network.clone(),
         rpc_urls,
         nft_id,
-        trustee_address: address.clone(),
+        trustee_address: trustee_address.to_string(),
         beneficiary_address: v.beneficiary_address.clone(),
         sponsor_address: String::new(),
         contracts,
@@ -714,30 +892,32 @@ async fn run_setup_after_keystore(
         gas_unit_price: 100000,
         created_at: format!("{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()),
-    };
-
-    if let Err(e) = node_config.save(&config_path) {
-        return result.fail("write_config", e);
     }
-    result.steps_performed.push("write_config".into());
-    eprintln!("[setup] Wrote config.json -> {}", config_path.display());
+}
 
-    // 9. Final escrow snapshot for the JSON output --------------------------
-    if !v.bootstrap_only {
-        match chain.get_all_balances(&address).await {
-            Ok(b) => {
-                // wallet balances (post auto-mint they should be 0 -- everything
-                // went to escrow). Skip; just record gas.
-                result.gas_balance_supra = Some(b.supra);
-            }
-            Err(e) => {
-                result.warnings.push(format!("final balance fetch failed: {}", e));
-            }
-        }
-    }
-
-    result.success = true;
-    result
+/// Derive token metadata addresses from network + contract address.
+/// Used by MR1c restore for `get_escrow_balance(nft_id, metadata)`
+/// queries. Matches `fetch_wallet_balances` in `src/run.rs` -- the same
+/// SHA3-256(contract || seed || 0xFE) scheme primary_fungible_store uses.
+pub fn network_token_metadata_addresses(
+    network: &deadmkt_config::Network,
+) -> Vec<(String, String)> {
+    use sha3::{Digest, Sha3_256};
+    let contract_addr = deadmkt_config::default_contract_addresses(network).settlement;
+    let contract_bytes = hex::decode(contract_addr.trim_start_matches("0x")).unwrap_or_default();
+    let seeds: &[(&str, &[u8])] = &[
+        ("EMM", b"deadmkt_emm"),
+        ("KAY", b"deadmkt_kay"),
+        ("TEE", b"deadmkt_tee"),
+    ];
+    seeds.iter().map(|(sym, seed)| {
+        let mut h = Sha3_256::new();
+        h.update(&contract_bytes);
+        h.update(seed);
+        h.update(&[0xFE]); // primary_fungible_store FA metadata derivation byte
+        let digest = h.finalize();
+        (sym.to_string(), format!("0x{}", hex::encode(digest)))
+    }).collect()
 }
 
 // =========================================================================
@@ -968,6 +1148,54 @@ mod tests {
         // not a panic.
         assert!(msg.contains("keystore") || msg.contains("decrypt") || msg.contains("password"),
             "unexpected error: {}", msg);
+    }
+
+    // ---- MR1c helpers ----------------------------------------------------
+
+    #[test]
+    fn t_mr1c_10_build_node_config_from_chain_round_trips_fields() {
+        let v = ValidatedSetupConfig {
+            network: deadmkt_config::Network::Testnet,
+            beneficiary_address: "0xbeef".into(),
+            bootstrap_only: false,
+            mint_amounts: MintAmounts::default(),
+            withdrawal_rules: WithdrawalRules {
+                holding_period_days: 90,
+                rushed_withdrawal_enabled: true,
+            },
+            faucet: FaucetCfg::default(),
+        };
+        let cfg = build_node_config_from_chain(&v, 42, "0xfeedface");
+        assert_eq!(cfg.nft_id, 42);
+        assert_eq!(cfg.trustee_address, "0xfeedface");
+        assert_eq!(cfg.beneficiary_address, "0xbeef");
+        assert_eq!(cfg.network, deadmkt_config::Network::Testnet);
+        assert_eq!(cfg.contracts.settlement, "0x9b8fd778b08131297d22b577c1f4e2f6ed85d04479cd73e0eb14bbf41fc6731c");
+        assert!(cfg.rpc_urls[0].contains("rpc-testnet"));
+        assert_eq!(cfg.bootstrap_peers.len(), 5);
+        assert_eq!(cfg.withdrawal_rules.holding_period_days, 90);
+        assert!(cfg.withdrawal_rules.rushed_withdrawal_enabled);
+        assert!(!cfg.strategy_auth_token.is_empty());
+    }
+
+    #[test]
+    fn t_mr1c_11_network_token_metadata_addresses_are_deterministic() {
+        let net = deadmkt_config::Network::Testnet;
+        let a = network_token_metadata_addresses(&net);
+        let b = network_token_metadata_addresses(&net);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 3);
+        let symbols: Vec<&str> = a.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(symbols, vec!["EMM", "KAY", "TEE"]);
+        // All three should be 0x + 64 hex (sha3_256 digest)
+        for (_, addr) in &a {
+            assert!(addr.starts_with("0x"));
+            assert_eq!(addr.len(), 66);
+        }
+        // EMM/KAY/TEE must derive to distinct addresses
+        assert_ne!(a[0].1, a[1].1);
+        assert_ne!(a[1].1, a[2].1);
+        assert_ne!(a[0].1, a[2].1);
     }
 
     #[test]
