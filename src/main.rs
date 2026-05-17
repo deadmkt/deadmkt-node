@@ -721,43 +721,28 @@ async fn main() {
 // a clear error JSON pointing operators at the wizard.
 // =========================================================================
 async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
-    use deadmkt_setup::noninteractive::{load_setup_config, run_setup_noninteractive_fresh, SetupResult, SetupMode};
+    use deadmkt_setup::noninteractive::{
+        load_setup_config, run_setup_noninteractive_fresh,
+        run_setup_noninteractive_llm_assisted, SetupResult, SetupMode,
+    };
 
     let dir = data_dir();
     let keystore_path = dir.join("keystore.json");
 
-    // (yes, yes) and (yes, no) are MR1b / MR1c territory -- not yet wired.
-    if keystore_path.exists() {
-        let mut r = SetupResult {
-            success: false,
-            mode: SetupMode::Fresh,
-            nft_id: None,
-            trustee_address: None,
-            beneficiary_address: None,
-            network: String::new(),
-            node_role: String::new(),
-            escrow_balances: None,
-            gas_balance_supra: None,
-            steps_performed: Vec::new(),
-            steps_skipped: Vec::new(),
-            warnings: Vec::new(),
-            error: None,
-            step: None,
-        };
-        r = r.fail(
-            "keystore_detection",
-            "Keystore already exists at this data dir. MR1a only handles fresh setup. LLM-assisted (MR1b) and restore (MR1c) entry points are not yet wired -- use the interactive `deadmkt-node setup` wizard meanwhile."
-        );
-        println!("{}", r.to_json());
-        std::process::exit(1);
-    }
-
-    // Load config from disk.
+    // Load config from disk first -- if this fails the decision matrix
+    // doesn't matter and we get a clean step=load_config error.
     let cfg = match load_setup_config(config_path) {
         Ok(c) => c,
         Err(e) => {
+            // We don't know yet which mode the operator intended; default to
+            // Fresh for the failure record (this is a config-load failure).
+            let mode_for_failure = if keystore_path.exists() {
+                SetupMode::ConfigWithKeystore
+            } else {
+                SetupMode::Fresh
+            };
             let r = SetupResult {
-                success: false, mode: SetupMode::Fresh,
+                success: false, mode: mode_for_failure,
                 nft_id: None, trustee_address: None, beneficiary_address: None,
                 network: String::new(), node_role: String::new(),
                 escrow_balances: None, gas_balance_supra: None,
@@ -782,7 +767,75 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
         contract_addr,
     );
 
-    let result = run_setup_noninteractive_fresh(&cfg, &chain, &dir).await;
+    // Branch on (keystore exists, config has password) per the spec
+    // startup-flow decision matrix.
+    let result = if keystore_path.exists() {
+        // MR1b path: keystore on disk -> prompt for password interactively
+        // and unlock. The LLM that wrote setup.json never sees the password.
+        //
+        // Early-reject if the config tries to ship a password while the
+        // keystore exists -- that crosses the LLM security boundary and
+        // would also confuse the operator who's about to be prompted.
+        if cfg.keystore_password.is_some() {
+            let r = SetupResult {
+                success: false, mode: SetupMode::ConfigWithKeystore,
+                nft_id: None, trustee_address: None, beneficiary_address: None,
+                network: String::new(), node_role: String::new(),
+                escrow_balances: None, gas_balance_supra: None,
+                steps_performed: Vec::new(), steps_skipped: Vec::new(),
+                warnings: Vec::new(),
+                error: Some("setup.json contains keystore_password but a keystore already exists at the data dir. MR1b (LLM-assisted) refuses password-in-config for the existing-keystore path -- the operator types the password interactively. Remove keystore_password from setup.json.".into()),
+                step: Some("validate_for_llm_assisted".into()),
+            };
+            println!("{}", r.to_json());
+            std::process::exit(1);
+        }
+        let password = match prompt_keystore_password() {
+            Ok(p) => p,
+            Err(e) => {
+                let mut r = SetupResult {
+                    success: false, mode: SetupMode::ConfigWithKeystore,
+                    nft_id: None, trustee_address: None, beneficiary_address: None,
+                    network: String::new(), node_role: String::new(),
+                    escrow_balances: None, gas_balance_supra: None,
+                    steps_performed: Vec::new(), steps_skipped: Vec::new(),
+                    warnings: Vec::new(),
+                    error: None, step: None,
+                };
+                r = r.fail("prompt_password", e);
+                println!("{}", r.to_json());
+                std::process::exit(1);
+            }
+        };
+        run_setup_noninteractive_llm_assisted(&cfg, &password, &chain, &dir).await
+    } else {
+        // MR1a path: no keystore -> generate from password supplied in config.
+        run_setup_noninteractive_fresh(&cfg, &chain, &dir).await
+    };
+
     println!("{}", result.to_json());
     std::process::exit(if result.success { 0 } else { 1 });
+}
+
+/// MR1b: prompt the operator for the keystore password on stderr,
+/// read one line from stdin. Echoes characters as the operator types
+/// (we don't pull in `rpassword` for this slice -- the existing
+/// interactive wizard's wizard_generate_keypair also echoes). Future
+/// MR1d / hardening can swap to a no-echo input.
+fn prompt_keystore_password() -> Result<String, String> {
+    use std::io::{BufRead, Write};
+    eprint!("Keystore password: ");
+    std::io::stderr().flush().map_err(|e| format!("flush stderr: {}", e))?;
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    let n = stdin.lock().read_line(&mut line)
+        .map_err(|e| format!("read stdin: {}", e))?;
+    if n == 0 {
+        return Err("stdin closed without password input (need a TTY or piped password)".into());
+    }
+    let trimmed = line.trim_end_matches(|c| c == '\n' || c == '\r').to_string();
+    if trimmed.is_empty() {
+        return Err("empty password".into());
+    }
+    Ok(trimmed)
 }

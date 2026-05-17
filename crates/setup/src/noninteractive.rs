@@ -193,6 +193,14 @@ impl SetupResult {
         self
     }
 
+    /// MR1b: tag a result that was created via `fresh_in_progress` with
+    /// the correct mode after the fact (e.g. when a validation failure
+    /// happens before we know which entry point we're in).
+    pub fn with_mode(mut self, mode: SetupMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
     /// Serialize to JSON string for stdout emission.
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|e| {
@@ -290,41 +298,70 @@ pub fn validate_withdrawal_rules(rules: &WithdrawalRules) -> Result<(), SetupErr
     Ok(())
 }
 
-/// Validate the full SetupConfig before running any chain operations.
-/// Returns the validated normalised values, ready to use.
-#[derive(Debug)]
+/// Validated common fields shared by MR1a (fresh) and MR1b (LLM-assisted)
+/// post-keystore. Keystore password is intentionally NOT here -- fresh
+/// pulls it from config, LLM-assisted prompts interactively at the CLI
+/// boundary; the chain orchestration doesn't need either after the
+/// keystore is unlocked.
+#[derive(Debug, Clone)]
 pub struct ValidatedSetupConfig {
     pub network: deadmkt_config::Network,
     pub beneficiary_address: String, // normalised (lowercase, trimmed)
     pub bootstrap_only: bool,        // node_role == "bootstrap"
-    pub keystore_password: String,   // MR1a requires this
     pub mint_amounts: MintAmounts,
     pub withdrawal_rules: WithdrawalRules,
     pub faucet: FaucetCfg,
 }
 
-pub fn validate_for_fresh_setup(cfg: &SetupConfig) -> Result<ValidatedSetupConfig, SetupError> {
+/// Common-field validation. Pure -- no IO.
+fn validate_common(cfg: &SetupConfig) -> Result<ValidatedSetupConfig, SetupError> {
     let network = validate_network(&cfg.network)?;
     let beneficiary_address = validate_address(&cfg.beneficiary_address)?;
     let bootstrap_only = validate_node_role(&cfg.node_role)?;
-    let keystore_password = cfg.keystore_password.clone().ok_or_else(|| {
-        SetupError::IoError(
-            "keystore_password is required for fresh setup (MR1a). For LLM-assisted (existing keystore) or restore flows, see MR1b/MR1c."
-                .to_string(),
-        )
-    })?;
-    validate_password(&keystore_password)?;
     validate_mint_amounts(&cfg.mint_amounts)?;
     validate_withdrawal_rules(&cfg.withdrawal_rules)?;
     Ok(ValidatedSetupConfig {
         network,
         beneficiary_address,
         bootstrap_only,
-        keystore_password,
         mint_amounts: cfg.mint_amounts.clone(),
         withdrawal_rules: cfg.withdrawal_rules.clone(),
         faucet: cfg.faucet.clone(),
     })
+}
+
+/// MR1a (fresh) validation. Returns (common fields, keystore_password).
+/// The password is required and must be >= 8 chars.
+pub fn validate_for_fresh_setup(
+    cfg: &SetupConfig,
+) -> Result<(ValidatedSetupConfig, String), SetupError> {
+    let v = validate_common(cfg)?;
+    let keystore_password = cfg.keystore_password.clone().ok_or_else(|| {
+        SetupError::IoError(
+            "keystore_password is required for fresh setup (MR1a). For LLM-assisted (existing keystore) the password comes from an interactive prompt -- omit this field and the node will ask."
+                .to_string(),
+        )
+    })?;
+    validate_password(&keystore_password)?;
+    Ok((v, keystore_password))
+}
+
+/// MR1b (LLM-assisted) validation. Keystore is already on disk; the
+/// password is collected interactively at the CLI boundary, not from
+/// the config (so the LLM that writes setup.json never sees it).
+/// **Rejects** configs that DO include keystore_password -- the
+/// security boundary is the whole point of MR1b. Use MR1a fresh setup
+/// instead in that case.
+pub fn validate_for_llm_assisted(
+    cfg: &SetupConfig,
+) -> Result<ValidatedSetupConfig, SetupError> {
+    if cfg.keystore_password.is_some() {
+        return Err(SetupError::IoError(
+            "MR1b (LLM-assisted) rejects setup.json that contains keystore_password. The LLM-safe path requires the operator to type the password interactively. Remove the field from the config (or use MR1a fresh setup if you intentionally want password-on-disk)."
+                .to_string(),
+        ));
+    }
+    validate_common(cfg)
 }
 
 // =========================================================================
@@ -354,8 +391,6 @@ pub fn generate_keystore_noninteractive(
     keystore_path: &std::path::Path,
     password: &str,
 ) -> Result<(String, ed25519_dalek::VerifyingKey, ed25519_dalek::SigningKey), SetupError> {
-    use sha3::{Digest, Sha3_256};
-
     if keystore_path.exists() {
         return Err(SetupError::IoError(format!(
             "keystore already exists at {} -- MR1a is fresh-setup only; for LLM-assisted (existing keystore) flow see MR1b, for restore see MR1c",
@@ -364,18 +399,43 @@ pub fn generate_keystore_noninteractive(
     }
 
     let (secret, public) = deadmkt_crypto::generate_keypair();
+    let address = derive_trustee_address(&public);
+    deadmkt_keystore::save_keystore(keystore_path, &secret, &public, password)?;
 
-    // Address = Sha3_256(public || 0x00). Same scheme used by
-    // wizard_generate_keypair.
+    Ok((address, public, secret))
+}
+
+/// MR1b: unlock an existing keystore file with the supplied password.
+/// Returns the trustee address + keys derived from the stored keypair.
+///
+/// FAILS cleanly with `KeystoreError` if the file is missing or the
+/// password is wrong -- the caller should report `step: "unlock_keystore"`
+/// to the operator.
+pub fn unlock_existing_keystore(
+    keystore_path: &std::path::Path,
+    password: &str,
+) -> Result<(String, ed25519_dalek::VerifyingKey, ed25519_dalek::SigningKey), SetupError> {
+    if !keystore_path.exists() {
+        return Err(SetupError::IoError(format!(
+            "no keystore at {} -- MR1b expects an existing keystore (use MR1a fresh setup if you have no keystore yet)",
+            keystore_path.display()
+        )));
+    }
+    let (secret, public) = deadmkt_keystore::load_keystore(keystore_path, password)?;
+    let address = derive_trustee_address(&public);
+    Ok((address, public, secret))
+}
+
+/// Derive the trustee on-chain address from an ed25519 public key.
+/// Matches the scheme used by wizard_generate_keypair and
+/// generate_keystore_noninteractive: Sha3_256(public || 0x00).
+fn derive_trustee_address(public: &ed25519_dalek::VerifyingKey) -> String {
+    use sha3::{Digest, Sha3_256};
     let mut hasher = Sha3_256::new();
     hasher.update(public.as_bytes());
     hasher.update(&[0x00]);
     let hash = hasher.finalize();
-    let address = format!("0x{}", hex::encode(hash));
-
-    deadmkt_keystore::save_keystore(keystore_path, &secret, &public, password)?;
-
-    Ok((address, public, secret))
+    format!("0x{}", hex::encode(hash))
 }
 
 // =========================================================================
@@ -420,46 +480,29 @@ impl crate::WizardIO for SilentIO {
 // =========================================================================
 
 /// Fresh-setup entry point: no keystore, has setup.json with password.
-///
-/// Caller is responsible for:
-///   - emitting `result.to_json()` to stdout
-///   - exiting with status code 1 if `result.success == false`
-///
-/// This function intentionally does not touch stdout, so the caller can
-/// position the JSON output cleanly.
+/// Generates the keystore from the supplied password, then runs the
+/// shared post-keystore orchestration.
 pub async fn run_setup_noninteractive_fresh(
     cfg: &SetupConfig,
     chain: &dyn crate::ChainClient,
     data_dir: &std::path::Path,
 ) -> SetupResult {
     // 1. Validate ------------------------------------------------------------
-    let v = match validate_for_fresh_setup(cfg) {
-        Ok(v) => v,
+    let (v, password) = match validate_for_fresh_setup(cfg) {
+        Ok(t) => t,
         Err(e) => {
             return SetupResult::fresh_in_progress(&cfg.network, &cfg.node_role)
                 .fail("validate", e);
         }
     };
 
-    let mut result = SetupResult::fresh_in_progress(
-        match v.network { deadmkt_config::Network::Testnet => "testnet", deadmkt_config::Network::Mainnet => "mainnet" },
-        if v.bootstrap_only { "bootstrap" } else { "trading" },
-    );
-    result.beneficiary_address = Some(v.beneficiary_address.clone());
+    let mut result = init_result(&v, SetupMode::Fresh);
     result.steps_performed.push("validate".into());
 
     // 2. Generate keystore --------------------------------------------------
     let keystore_path = data_dir.join("keystore.json");
-    let config_path = data_dir.join("config.json");
-    if config_path.exists() {
-        result.warnings.push(format!(
-            "config.json already exists at {} -- it will be overwritten",
-            config_path.display()
-        ));
-    }
     let (address, public, secret) = match generate_keystore_noninteractive(
-        &keystore_path,
-        &v.keystore_password,
+        &keystore_path, &password,
     ) {
         Ok(t) => t,
         Err(e) => return result.fail("generate_keystore", e),
@@ -467,6 +510,84 @@ pub async fn run_setup_noninteractive_fresh(
     result.trustee_address = Some(address.clone());
     result.steps_performed.push("generate_keystore".into());
     eprintln!("[setup] Keystore generated. Trustee address: {}", address);
+
+    // 3. Hand off to shared post-keystore work.
+    run_setup_after_keystore(v, address, public, secret, chain, data_dir, result).await
+}
+
+/// MR1b: LLM-assisted entry point. Keystore is already on disk; the
+/// password was prompted at the CLI boundary (so the LLM that wrote
+/// setup.json never saw it). Validates the config (rejects if it
+/// contains a password), unlocks the keystore with the supplied
+/// password, then runs the shared post-keystore orchestration.
+pub async fn run_setup_noninteractive_llm_assisted(
+    cfg: &SetupConfig,
+    keystore_password: &str,
+    chain: &dyn crate::ChainClient,
+    data_dir: &std::path::Path,
+) -> SetupResult {
+    // 1. Validate ------------------------------------------------------------
+    let v = match validate_for_llm_assisted(cfg) {
+        Ok(v) => v,
+        Err(e) => {
+            return SetupResult::fresh_in_progress(&cfg.network, &cfg.node_role)
+                .fail("validate", e)
+                .with_mode(SetupMode::ConfigWithKeystore);
+        }
+    };
+
+    let mut result = init_result(&v, SetupMode::ConfigWithKeystore);
+    result.steps_performed.push("validate".into());
+
+    // 2. Unlock keystore -----------------------------------------------------
+    let keystore_path = data_dir.join("keystore.json");
+    let (address, public, secret) = match unlock_existing_keystore(
+        &keystore_path, keystore_password,
+    ) {
+        Ok(t) => t,
+        Err(e) => return result.fail("unlock_keystore", e),
+    };
+    result.trustee_address = Some(address.clone());
+    result.steps_performed.push("unlock_keystore".into());
+    eprintln!("[setup] Keystore unlocked. Trustee address: {}", address);
+
+    // 3. Hand off to shared post-keystore work.
+    run_setup_after_keystore(v, address, public, secret, chain, data_dir, result).await
+}
+
+fn init_result(v: &ValidatedSetupConfig, mode: SetupMode) -> SetupResult {
+    let network = match v.network {
+        deadmkt_config::Network::Testnet => "testnet",
+        deadmkt_config::Network::Mainnet => "mainnet",
+    };
+    let node_role = if v.bootstrap_only { "bootstrap" } else { "trading" };
+    let mut r = SetupResult::fresh_in_progress(network, node_role);
+    r.mode = mode;
+    r.beneficiary_address = Some(v.beneficiary_address.clone());
+    r
+}
+
+/// Shared post-keystore orchestration used by fresh (MR1a) and
+/// LLM-assisted (MR1b) entry points. Idempotent: each chain step
+/// either skips work that's already done or surfaces the underlying
+/// "already X" error gracefully (see register_and_deposit catching
+/// E_ALREADY_REGISTERED).
+async fn run_setup_after_keystore(
+    v: ValidatedSetupConfig,
+    address: String,
+    public: ed25519_dalek::VerifyingKey,
+    secret: ed25519_dalek::SigningKey,
+    chain: &dyn crate::ChainClient,
+    data_dir: &std::path::Path,
+    mut result: SetupResult,
+) -> SetupResult {
+    let config_path = data_dir.join("config.json");
+    if config_path.exists() {
+        result.warnings.push(format!(
+            "config.json already exists at {} -- it will be overwritten",
+            config_path.display()
+        ));
+    }
 
     // 3. Set chain signer ---------------------------------------------------
     chain.set_signer(secret.as_bytes(), public.as_bytes(), &address);
@@ -534,11 +655,8 @@ pub async fn run_setup_noninteractive_fresh(
                 Err(e) => return result.fail("auto_mint_and_deposit", e),
             }
         } else {
-            // Mainnet: tokens must be funded externally and deposited before
-            // trading. MR1a doesn't handle mainnet token funding flow yet --
-            // operator can use the interactive wizard or extend setup.json.
             result.warnings.push(
-                "Mainnet: token funding/deposit must be done manually (MR1a fresh setup does not auto-mint on mainnet).".to_string(),
+                "Mainnet: token funding/deposit must be done manually (MR1a/b do not auto-mint on mainnet).".to_string(),
             );
         }
     }
@@ -766,11 +884,11 @@ mod tests {
             withdrawal_rules: WithdrawalRules::default(),
             faucet: FaucetCfg::default(),
         };
-        let v = validate_for_fresh_setup(&cfg).unwrap();
+        let (v, password) = validate_for_fresh_setup(&cfg).unwrap();
         assert_eq!(v.network, deadmkt_config::Network::Testnet);
         assert_eq!(v.beneficiary_address, "0xabcdef0123"); // lowercased
         assert!(!v.bootstrap_only);
-        assert_eq!(v.keystore_password, "strongpass");
+        assert_eq!(password, "strongpass");
     }
 
     #[test]
@@ -787,6 +905,79 @@ mod tests {
         let err = validate_for_fresh_setup(&cfg).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("keystore_password is required"), "unexpected error: {}", msg);
+    }
+
+    // ---- MR1b validation ------------------------------------------------
+
+    #[test]
+    fn t_mr1b_10_validate_for_llm_assisted_happy_path() {
+        let cfg = SetupConfig {
+            network: "testnet".into(),
+            beneficiary_address: "0xABCDef0123".into(),
+            node_role: "trading".into(),
+            keystore_password: None, // LLM safety: no password in config
+            mint_amounts: MintAmounts::default(),
+            withdrawal_rules: WithdrawalRules::default(),
+            faucet: FaucetCfg::default(),
+        };
+        let v = validate_for_llm_assisted(&cfg).unwrap();
+        assert_eq!(v.network, deadmkt_config::Network::Testnet);
+        assert_eq!(v.beneficiary_address, "0xabcdef0123");
+    }
+
+    #[test]
+    fn t_mr1b_11_validate_for_llm_assisted_rejects_password_in_config() {
+        let cfg = SetupConfig {
+            network: "testnet".into(),
+            beneficiary_address: "0xABCDef0123".into(),
+            node_role: "trading".into(),
+            keystore_password: Some("oops".into()), // present -> rejected
+            mint_amounts: MintAmounts::default(),
+            withdrawal_rules: WithdrawalRules::default(),
+            faucet: FaucetCfg::default(),
+        };
+        let err = validate_for_llm_assisted(&cfg).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("rejects setup.json that contains keystore_password"), "unexpected error: {}", msg);
+    }
+
+    // ---- MR1b unlock_existing_keystore -----------------------------------
+
+    #[test]
+    fn t_mr1b_20_unlock_existing_keystore_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("keystore.json");
+        // Create a keystore with MR1a's generator.
+        let (addr_a, pub_a, _sec_a) = generate_keystore_noninteractive(&path, "strongpass").unwrap();
+        // Unlock via MR1b's helper.
+        let (addr_b, pub_b, _sec_b) = unlock_existing_keystore(&path, "strongpass").unwrap();
+        // Same keys -> same derived address.
+        assert_eq!(addr_a, addr_b);
+        assert_eq!(pub_a.as_bytes(), pub_b.as_bytes());
+    }
+
+    #[test]
+    fn t_mr1b_21_unlock_existing_keystore_wrong_password() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("keystore.json");
+        generate_keystore_noninteractive(&path, "rightpass").unwrap();
+        let err = unlock_existing_keystore(&path, "wrongpass").unwrap_err();
+        let msg = format!("{}", err);
+        // Underlying keystore lib surfaces a "keystore error" -- key check is
+        // that we get an Err and the failure path is the same as bad-password,
+        // not a panic.
+        assert!(msg.contains("keystore") || msg.contains("decrypt") || msg.contains("password"),
+            "unexpected error: {}", msg);
+    }
+
+    #[test]
+    fn t_mr1b_22_unlock_existing_keystore_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("does-not-exist.json");
+        let err = unlock_existing_keystore(&path, "anything").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("no keystore at"), "unexpected error: {}", msg);
+        assert!(msg.contains("MR1a")); // hint to use fresh setup
     }
 
     // ---- SetupResult serialization --------------------------------------
