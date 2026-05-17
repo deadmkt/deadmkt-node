@@ -3,6 +3,12 @@
 // NFT mint/import, withdrawal config, register+deposit, profit config,
 // auth token, bootstrap peers.
 
+// MR1a: non-interactive setup schema + validation + structured JSON
+// output. See `noninteractive::run_setup_noninteractive_fresh` for the
+// fresh-setup entry point and `noninteractive::SetupConfig` for the
+// JSON schema. MR1b/c/d build on this foundation.
+pub mod noninteractive;
+
 use deadmkt_config::{
     default_contract_addresses, generate_strategy_auth_token,
     ConfigError, Network, NodeConfig, ProfitConfig, WithdrawalConfig,
