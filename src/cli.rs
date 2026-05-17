@@ -3,12 +3,20 @@
 // =========================================================================
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "deadmkt-node", version = env!("CARGO_PKG_VERSION"), about = "deadmkt trading node")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// MR1a: path to setup JSON config for non-interactive setup.
+    /// When provided and no keystore exists, runs fresh setup with the
+    /// keystore_password from the file. (LLM-assisted + restore paths
+    /// are MR1b/MR1c, not yet wired up.)
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug, Clone, PartialEq)]

@@ -37,6 +37,15 @@ fn dirs_or_default() -> PathBuf {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // MR1a: --config triggers non-interactive setup BEFORE subcommand
+    // routing. Three entry points are designed in the spec
+    // (fresh / LLM-assisted / restore); MR1a only wires up the fresh path.
+    // MR1b and MR1c will extend this match.
+    if let Some(config_path) = cli.config.as_ref() {
+        run_noninteractive_setup_and_exit(config_path).await;
+    }
+
     let command = cli.resolve_command();
 
     match command {
@@ -695,4 +704,85 @@ async fn main() {
             }
         }
     }
+}
+
+// =========================================================================
+// MR1a: --config non-interactive setup entry point
+//
+// Decision matrix (per non-interactive-setup.md startup flow):
+//   keystore.json exists?    has --config?    action
+//   ----------------------   --------------   ----------------------------
+//   no                       yes              MR1a: fresh setup (this fn)
+//   yes                      yes              MR1b (LLM-assisted)  -- TODO
+//   yes                      no               MR1c (restore)       -- TODO
+//   no                       no               existing interactive wizard
+//
+// For MR1a, only the (no, yes) cell is wired. Other (yes, *) cells emit
+// a clear error JSON pointing operators at the wizard.
+// =========================================================================
+async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
+    use deadmkt_setup::noninteractive::{load_setup_config, run_setup_noninteractive_fresh, SetupResult, SetupMode};
+
+    let dir = data_dir();
+    let keystore_path = dir.join("keystore.json");
+
+    // (yes, yes) and (yes, no) are MR1b / MR1c territory -- not yet wired.
+    if keystore_path.exists() {
+        let mut r = SetupResult {
+            success: false,
+            mode: SetupMode::Fresh,
+            nft_id: None,
+            trustee_address: None,
+            beneficiary_address: None,
+            network: String::new(),
+            node_role: String::new(),
+            escrow_balances: None,
+            gas_balance_supra: None,
+            steps_performed: Vec::new(),
+            steps_skipped: Vec::new(),
+            warnings: Vec::new(),
+            error: None,
+            step: None,
+        };
+        r = r.fail(
+            "keystore_detection",
+            "Keystore already exists at this data dir. MR1a only handles fresh setup. LLM-assisted (MR1b) and restore (MR1c) entry points are not yet wired -- use the interactive `deadmkt-node setup` wizard meanwhile."
+        );
+        println!("{}", r.to_json());
+        std::process::exit(1);
+    }
+
+    // Load config from disk.
+    let cfg = match load_setup_config(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            let r = SetupResult {
+                success: false, mode: SetupMode::Fresh,
+                nft_id: None, trustee_address: None, beneficiary_address: None,
+                network: String::new(), node_role: String::new(),
+                escrow_balances: None, gas_balance_supra: None,
+                steps_performed: Vec::new(), steps_skipped: Vec::new(),
+                warnings: Vec::new(),
+                error: Some(format!("{}", e)),
+                step: Some("load_config".into()),
+            };
+            println!("{}", r.to_json());
+            std::process::exit(1);
+        }
+    };
+
+    // Build chain client (mirrors the interactive Setup branch above).
+    let defaults = default_contract_addresses(&Network::Testnet);
+    let contract_addr = std::env::var("DEADMKT_CONTRACT_ADDR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(defaults.settlement);
+    let chain = setup_bridge::SupraSetupClient::new(
+        vec!["https://rpc-testnet.supra.com".into()],
+        contract_addr,
+    );
+
+    let result = run_setup_noninteractive_fresh(&cfg, &chain, &dir).await;
+    println!("{}", result.to_json());
+    std::process::exit(if result.success { 0 } else { 1 });
 }
