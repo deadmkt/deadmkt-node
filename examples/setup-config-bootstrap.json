@@ -1,0 +1,10 @@
+{
+  "network": "testnet",
+  "beneficiary_address": "0x0000000000000000000000000000000000000000000000000000000000000001",
+  "node_role": "bootstrap",
+  "keystore_password": "REPLACE-WITH-STRONG-PASSWORD-MIN-8-CHARS",
+  "faucet": {
+    "auto_fund": true,
+    "min_balance_supra": 1000
+  }
+}

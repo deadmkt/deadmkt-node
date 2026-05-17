@@ -365,6 +365,72 @@ pub fn validate_for_llm_assisted(
 }
 
 // =========================================================================
+// MR1d: file-permission enforcement + password scrubbing
+//
+// When setup.json carries `keystore_password`, the file is as sensitive
+// as the keystore itself. Two protections:
+//   1. Refuse to read if Unix permissions are wider than 0600 (mirrors
+//      SSH's "permissions too open" stance on private keys).
+//   2. After a successful fresh-setup, rewrite the file with the
+//      keystore_password field removed -- so a stale setup.json on
+//      disk never carries the secret beyond the moment of use.
+// =========================================================================
+
+/// MR1d: enforce that setup.json is owner-readable-only (0600) on Unix.
+/// No-op on non-Unix platforms (Windows ACLs are out of scope here).
+///
+/// Only call this when you know the config carries sensitive data
+/// (e.g. `keystore_password.is_some()`). A no-secret config is
+/// harmless to leave world-readable.
+pub fn enforce_setup_config_permissions(path: &std::path::Path) -> Result<(), SetupError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let md = std::fs::metadata(path)
+            .map_err(|e| SetupError::IoError(format!("stat {}: {}", path.display(), e)))?;
+        let mode = md.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            return Err(SetupError::IoError(format!(
+                "{} contains keystore_password but permissions are 0o{:o} (must be 0o600). Run: chmod 600 {}",
+                path.display(), mode, path.display()
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path; // suppress unused warning
+    }
+    Ok(())
+}
+
+/// MR1d: rewrite setup.json with the `keystore_password` field removed.
+/// Best-effort: returns Err if read/parse/write fails, but the caller
+/// should not abort setup on a scrub failure -- the keystore is already
+/// generated and the operator can manually delete the file. We surface
+/// the failure as a warning in the SetupResult instead.
+pub fn scrub_password_from_setup_file(path: &std::path::Path) -> Result<(), SetupError> {
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| SetupError::IoError(format!("read {} for scrub: {}", path.display(), e)))?;
+    let mut value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| SetupError::IoError(format!("parse {} for scrub: {}", path.display(), e)))?;
+    if let serde_json::Value::Object(map) = &mut value {
+        if map.remove("keystore_password").is_none() {
+            // Field already gone (e.g. caller already scrubbed) -- nothing to do.
+            return Ok(());
+        }
+    } else {
+        return Err(SetupError::IoError(format!(
+            "{} is not a JSON object", path.display()
+        )));
+    }
+    let new_body = serde_json::to_string_pretty(&value)
+        .map_err(|e| SetupError::IoError(format!("re-serialize {} after scrub: {}", path.display(), e)))?;
+    std::fs::write(path, new_body)
+        .map_err(|e| SetupError::IoError(format!("write scrubbed {}: {}", path.display(), e)))?;
+    Ok(())
+}
+
+// =========================================================================
 // Config loading
 // =========================================================================
 
@@ -1287,5 +1353,88 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         let r = load_setup_config(&path);
         assert!(r.is_err());
+    }
+
+    // =====================================================================
+    // MR1d: production gate + permission enforcement + scrubbing
+    // =====================================================================
+
+    #[cfg(unix)]
+    #[test]
+    fn t_mr1d_01_enforce_permissions_rejects_wide_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("setup.json");
+        std::fs::write(&path, "{}").unwrap();
+        // 0644 is the default umask result -- the failure mode we want to catch.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = enforce_setup_config_permissions(&path).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("0o644"), "expected mode in error, got: {}", msg);
+        assert!(msg.contains("0o600"), "expected target mode in error, got: {}", msg);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn t_mr1d_02_enforce_permissions_accepts_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("setup.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        enforce_setup_config_permissions(&path).expect("0600 must be accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn t_mr1d_03_enforce_permissions_rejects_group_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("setup.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(enforce_setup_config_permissions(&path).is_err());
+    }
+
+    #[test]
+    fn t_mr1d_10_scrub_removes_only_keystore_password() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("setup.json");
+        let body = r#"{
+            "network": "testnet",
+            "keystore_password": "secret-do-not-leak",
+            "node_role": "trustee"
+        }"#;
+        std::fs::write(&path, body).unwrap();
+        scrub_password_from_setup_file(&path).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("secret-do-not-leak"));
+        assert!(!after.contains("keystore_password"));
+        assert!(after.contains("\"network\""));
+        assert!(after.contains("\"node_role\""));
+        // Result must still parse as JSON.
+        let _: serde_json::Value = serde_json::from_str(&after).unwrap();
+    }
+
+    #[test]
+    fn t_mr1d_11_scrub_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("setup.json");
+        let body = r#"{"network":"testnet"}"#;
+        std::fs::write(&path, body).unwrap();
+        // No keystore_password to start -- scrub must not error.
+        scrub_password_from_setup_file(&path).unwrap();
+        // Run again -- still fine.
+        scrub_password_from_setup_file(&path).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("testnet"));
+    }
+
+    #[test]
+    fn t_mr1d_12_scrub_rejects_non_object_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("setup.json");
+        std::fs::write(&path, "[1, 2, 3]").unwrap();
+        assert!(scrub_password_from_setup_file(&path).is_err());
     }
 }

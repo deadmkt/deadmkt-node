@@ -15,3 +15,10 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[features]
+# MR1d: when enabled, insecure (unencrypted on-disk) keystore mode is
+# disabled at runtime. Release builds for mainnet must enable this.
+# Default (off) keeps insecure mode available for scale-test and the
+# interactive `setup --insecure` flow.
+production = []

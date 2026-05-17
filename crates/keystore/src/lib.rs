@@ -77,6 +77,10 @@ struct EncryptedKeystore {
     public_key: String, // hex, 32 bytes
 }
 
+// Schema for on-disk insecure-mode files. Kept available in production
+// builds (even though the save/load fns return errors there) so future
+// detect/upgrade tooling can still parse legacy files.
+#[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
 struct InsecureKeystore {
     mode: String,       // "insecure"
@@ -172,9 +176,16 @@ pub fn load_keystore(
 }
 
 // =========================================================================
-// Insecure mode
+// Insecure mode (gated by `production` feature -- MR1d)
+//
+// Release binaries built with `--features production` reject all
+// insecure-mode operations at runtime. The variant `KeystoreMode::Insecure`
+// stays present so callers can still detect "this on-disk file is in
+// insecure format" and report a clean error instead of a generic
+// deserialization failure.
 // =========================================================================
 
+#[cfg(not(feature = "production"))]
 pub fn save_keystore_insecure(
     path: &Path,
     secret: &SigningKey,
@@ -190,6 +201,19 @@ pub fn save_keystore_insecure(
     Ok(())
 }
 
+#[cfg(feature = "production")]
+pub fn save_keystore_insecure(
+    _path: &Path,
+    _secret: &SigningKey,
+    _public: &VerifyingKey,
+) -> Result<(), KeystoreError> {
+    Err(KeystoreError::InvalidKeyData(
+        "insecure keystore mode is disabled in production builds (MR1d). Use save_keystore (encrypted) instead."
+            .to_string(),
+    ))
+}
+
+#[cfg(not(feature = "production"))]
 pub fn load_keystore_insecure(
     path: &Path,
 ) -> Result<(SigningKey, VerifyingKey), KeystoreError> {
@@ -206,6 +230,16 @@ pub fn load_keystore_insecure(
     let secret = SigningKey::from_bytes(secret_bytes.as_slice().try_into().unwrap());
     let public = secret.verifying_key();
     Ok((secret, public))
+}
+
+#[cfg(feature = "production")]
+pub fn load_keystore_insecure(
+    _path: &Path,
+) -> Result<(SigningKey, VerifyingKey), KeystoreError> {
+    Err(KeystoreError::InvalidKeyData(
+        "insecure keystore mode is disabled in production builds (MR1d). Re-create the keystore using the encrypted path (`deadmkt-node setup` or `--config setup.json` with keystore_password)."
+            .to_string(),
+    ))
 }
 
 // =========================================================================
