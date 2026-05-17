@@ -1,0 +1,19 @@
+{
+  "network": "testnet",
+  "beneficiary_address": "0x0000000000000000000000000000000000000000000000000000000000000001",
+  "node_role": "trading",
+  "keystore_password": "REPLACE-WITH-STRONG-PASSWORD-MIN-8-CHARS",
+  "mint_amounts": {
+    "emm": 50000,
+    "kay": 50000,
+    "tee": 50000
+  },
+  "withdrawal_rules": {
+    "holding_period_days": 90,
+    "rushed_withdrawal_enabled": true
+  },
+  "faucet": {
+    "auto_fund": true,
+    "min_balance_supra": 1000
+  }
+}

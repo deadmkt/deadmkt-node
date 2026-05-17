@@ -735,8 +735,9 @@ async fn main() {
 // =========================================================================
 async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
     use deadmkt_setup::noninteractive::{
-        load_setup_config, run_setup_noninteractive_fresh,
-        run_setup_noninteractive_llm_assisted, SetupResult, SetupMode,
+        enforce_setup_config_permissions, load_setup_config,
+        run_setup_noninteractive_fresh, run_setup_noninteractive_llm_assisted,
+        scrub_password_from_setup_file, SetupResult, SetupMode,
     };
 
     let dir = data_dir();
@@ -768,6 +769,31 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
             std::process::exit(1);
         }
     };
+
+    // MR1d: refuse to proceed if setup.json carries a keystore_password
+    // but is world/group-readable. Mirrors SSH's "permissions too open"
+    // stance: a secret-bearing file must be 0600.
+    if cfg.keystore_password.is_some() {
+        if let Err(e) = enforce_setup_config_permissions(config_path) {
+            let mode_for_failure = if keystore_path.exists() {
+                SetupMode::ConfigWithKeystore
+            } else {
+                SetupMode::Fresh
+            };
+            let r = SetupResult {
+                success: false, mode: mode_for_failure,
+                nft_id: None, trustee_address: None, beneficiary_address: None,
+                network: String::new(), node_role: String::new(),
+                escrow_balances: None, gas_balance_supra: None,
+                steps_performed: Vec::new(), steps_skipped: Vec::new(),
+                warnings: Vec::new(),
+                error: Some(format!("{}", e)),
+                step: Some("enforce_config_permissions".into()),
+            };
+            println!("{}", r.to_json());
+            std::process::exit(1);
+        }
+    }
 
     // Build chain client (mirrors the interactive Setup branch above).
     let defaults = default_contract_addresses(&Network::Testnet);
@@ -825,6 +851,23 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
         // MR1a path: no keystore -> generate from password supplied in config.
         run_setup_noninteractive_fresh(&cfg, &chain, &dir).await
     };
+
+    // MR1d: if setup succeeded AND the config carried a keystore_password,
+    // rewrite the file with the password field stripped. The keystore is
+    // already on disk encrypted, so the plaintext copy in setup.json is
+    // now a liability. A scrub failure does not flip the result to
+    // failure -- we surface it as a warning so the operator can clean
+    // up manually.
+    let mut result = result;
+    if result.success && cfg.keystore_password.is_some() {
+        match scrub_password_from_setup_file(config_path) {
+            Ok(()) => result.steps_performed.push("scrub_password_from_config".into()),
+            Err(e) => result.warnings.push(format!(
+                "failed to scrub keystore_password from {}: {} -- delete the file manually or chmod 600 it",
+                config_path.display(), e
+            )),
+        }
+    }
 
     println!("{}", result.to_json());
     std::process::exit(if result.success { 0 } else { 1 });

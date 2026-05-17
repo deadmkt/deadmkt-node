@@ -11,10 +11,13 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// MR1a: path to setup JSON config for non-interactive setup.
-    /// When provided and no keystore exists, runs fresh setup with the
-    /// keystore_password from the file. (LLM-assisted + restore paths
-    /// are MR1b/MR1c, not yet wired up.)
+    /// Path to setup JSON config for non-interactive setup.
+    ///   - MR1a (fresh):       no keystore + config has keystore_password
+    ///   - MR1b (LLM-assisted): keystore present + config has no password
+    ///                          (operator types password at prompt)
+    ///   - MR1c (restore):     keystore present + no --config (run with no flags)
+    /// MR1d gates: a config with keystore_password must be `chmod 600`;
+    /// after a successful fresh setup the password is scrubbed from the file.
     #[arg(long)]
     pub config: Option<PathBuf>,
 }
