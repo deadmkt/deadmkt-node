@@ -38,15 +38,28 @@ fn dirs_or_default() -> PathBuf {
 async fn main() {
     let cli = Cli::parse();
 
-    // MR1a: --config triggers non-interactive setup BEFORE subcommand
-    // routing. Three entry points are designed in the spec
-    // (fresh / LLM-assisted / restore); MR1a only wires up the fresh path.
-    // MR1b and MR1c will extend this match.
+    // MR1a/b: --config triggers non-interactive setup BEFORE subcommand
+    // routing. Routes to fresh (no keystore) or LLM-assisted (keystore
+    // present + interactive password prompt) depending on data-dir state.
     if let Some(config_path) = cli.config.as_ref() {
         run_noninteractive_setup_and_exit(config_path).await;
     }
 
     let command = cli.resolve_command();
+
+    // MR1c: restore-from-backup. Triggered when the operator runs plain
+    // `deadmkt-node` (default Run) with a keystore in the data dir but
+    // no config.json -- i.e. they restored their keystore backup and
+    // need the node to reconstruct the config from chain state. Other
+    // subcommands (status, escrow, setup, etc.) are not intercepted.
+    if matches!(command, Command::Run) {
+        let dir = data_dir();
+        let keystore_path = dir.join("keystore.json");
+        let config_path = dir.join("config.json");
+        if keystore_path.exists() && !config_path.exists() {
+            run_restore_setup_and_exit(&dir).await;
+        }
+    }
 
     match command {
         Command::Version => {
@@ -838,4 +851,64 @@ fn prompt_keystore_password() -> Result<String, String> {
         return Err("empty password".into());
     }
     Ok(trimmed)
+}
+
+// =========================================================================
+// MR1c: restore-from-backup
+//
+// Operator drops their backed-up keystore.json into the data dir and runs
+// `deadmkt-node` (no flags). We detect the (keystore present, config
+// missing) state, prompt for the password, unlock, query chain for the
+// trustee's NFT + beneficiary + escrow, and write a fresh config.json.
+// Operator runs `deadmkt-node` again to start trading -- that second
+// invocation skips this branch because config.json now exists.
+// =========================================================================
+async fn run_restore_setup_and_exit(data_dir: &std::path::Path) -> ! {
+    use deadmkt_setup::noninteractive::{
+        run_setup_noninteractive_restore, SetupResult, SetupMode,
+    };
+
+    // Prompt for password before we touch chain state.
+    let password = match prompt_keystore_password() {
+        Ok(p) => p,
+        Err(e) => {
+            let mut r = SetupResult {
+                success: false, mode: SetupMode::Restore,
+                nft_id: None, trustee_address: None, beneficiary_address: None,
+                network: String::new(), node_role: String::new(),
+                escrow_balances: None, gas_balance_supra: None,
+                steps_performed: Vec::new(), steps_skipped: Vec::new(),
+                warnings: Vec::new(),
+                error: None, step: None,
+            };
+            r = r.fail("prompt_password", e);
+            println!("{}", r.to_json());
+            std::process::exit(1);
+        }
+    };
+
+    // Network: default to testnet, allow DEADMKT_NETWORK env override.
+    let network = match std::env::var("DEADMKT_NETWORK").unwrap_or_default().as_str() {
+        "mainnet" => Network::Mainnet,
+        _ => Network::Testnet,
+    };
+
+    // Build chain client mirroring the interactive Setup branch.
+    let defaults = default_contract_addresses(&network);
+    let contract_addr = std::env::var("DEADMKT_CONTRACT_ADDR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(defaults.settlement);
+    let rpc_url = match network {
+        Network::Testnet => "https://rpc-testnet.supra.com",
+        Network::Mainnet => "https://rpc-mainnet.supra.com",
+    };
+    let chain = setup_bridge::SupraSetupClient::new(
+        vec![rpc_url.into()],
+        contract_addr,
+    );
+
+    let result = run_setup_noninteractive_restore(&password, network, &chain, data_dir).await;
+    println!("{}", result.to_json());
+    std::process::exit(if result.success { 0 } else { 1 });
 }
