@@ -921,12 +921,45 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     // (amounts + countdown + claimable_at). If the hold has already
     // expired, claim immediately; otherwise spawn a one-shot task that
     // sleeps until claimable_at and submits claim_mint.
+    // MR2: shared status atomics + pending-mint mutex declared here so
+    // both the SP10 startup block (below) and the SP8 health endpoint
+    // (further down) share the same handles. The values are written
+    // from the existing main-loop sites (gas poll, batch_start,
+    // settle / liveness counters, GP1 transitions) and from the SP10
+    // auto-claim task; no new RPC is added.
+    let mr2_current_batch = Arc::new(AtomicU64::new(0));
+    let mr2_current_phase = Arc::new(std::sync::atomic::AtomicU8::new(0)); // Commit=0..Swap=3
+    let mr2_pool_id = Arc::new(AtomicU64::new(0));
+    let mr2_num_pools = Arc::new(AtomicU64::new(num_pools));
+    let mr2_uptime_batches = Arc::new(AtomicU64::new(0));
+    let mr2_gas_balance_micro = Arc::new(AtomicU64::new(0));
+    let mr2_gas_status = Arc::new(std::sync::atomic::AtomicU8::new(0)); // Normal=0,Low=1,Critical=2
+    let mr2_trading_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mr2_paused_since_batch = Arc::new(AtomicU64::new(0));
+    let mr2_escrow_emm = Arc::new(AtomicU64::new(0));
+    let mr2_escrow_kay = Arc::new(AtomicU64::new(0));
+    let mr2_escrow_tee = Arc::new(AtomicU64::new(0));
+    let mr2_liveness_consecutive = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let mr2_liveness_attempts = Arc::new(AtomicU64::new(0));
+    let mr2_liveness_successes = Arc::new(AtomicU64::new(0));
+    let mr2_settle_submits_total = Arc::new(AtomicU64::new(0));
+    let mr2_settle_aborts_total = Arc::new(AtomicU64::new(0));
+    let mr2_pending_mint: Arc<std::sync::Mutex<Option<Mr2PendingMint>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
     if let Some(pm) = fetch_pending_mint_full(&chain, &config.trustee_address).await {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let remaining = pm.claimable_at as i64 - now_secs as i64;
+        *mr2_pending_mint.lock().unwrap() = Some(Mr2PendingMint {
+            emm_amount: pm.m_amount,
+            kay_amount: pm.k_amount,
+            tee_amount: pm.t_amount,
+            supra_cost: pm.supra_cost,
+            claimable_at_unix: pm.claimable_at,
+        });
         let fmt_token = |raw: u64| -> String {
             let d = *token_decimals.get("EMM").unwrap_or(&5u8) as u32;
             let factor = 10u64.pow(d);
@@ -951,6 +984,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
         // Spawn auto-claim task. Sleep duration clamps to 0 if hold expired.
         let auto_claim_client = Arc::clone(&token_client_arc);
         let auto_claim_lock = tx_lock.clone();
+        let auto_claim_pending = mr2_pending_mint.clone();
         let sleep_secs: u64 = if remaining > 0 { remaining as u64 } else { 0 };
         tokio::spawn(async move {
             if sleep_secs > 0 {
@@ -964,6 +998,8 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                     // heartbeat reap, the deposit reactivates it. Note this for
                     // operator awareness.
                     println!("[mint] If NFT was inactive, the deposit just reactivated heartbeat.");
+                    // MR2: clear pending-mint shared state so /status reflects reality.
+                    *auto_claim_pending.lock().unwrap() = None;
                 }
                 Ok(r) => eprintln!("[mint] Auto-claim FAILED: {}", r.vm_status),
                 Err(e) => eprintln!("[mint] Auto-claim ERROR: {}", e),
@@ -1124,6 +1160,10 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     // through Low avoids flapping near the critical line).
     let mut trading_paused: bool = false;
     let mut paused_since_batch: u64 = 0;
+
+    // MR2 shared status state was declared above (before the SP10
+    // startup detection) so both can use the same handles. The values
+    // are written from the existing main-loop sites below.
     let mut last_new_block_time = std::time::Instant::now();
     // Stall detection moved to poller task (SP3)
 
@@ -1266,10 +1306,40 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let mut liveness_auto_reactivate_attempts: u64 = 0;
     let mut liveness_auto_reactivate_successes: u64 = 0;
 
-    // SP8d: Health endpoint
+    // SP8d / MR2: Health + status endpoint.
+    //
+    // Serves the v1 status JSON described in `planning/specs/MR2-status-json.md`.
+    // The handler is pure read -- it never makes a chain call; every value
+    // it serves was already computed by the chain-poll loop and snapshotted
+    // into a shared atomic above.
     {
+        let identity_network = format!("{:?}", config.network).to_lowercase();
+        let identity_role = if bootstrap_mode { "bootstrap" } else { "trading" }.to_string();
+        let identity_nft_id = config.nft_id;
+        let identity_trustee = config.trustee_address.clone();
+        let identity_beneficiary = config.beneficiary_address.clone();
+
         let health_peers = gossip_peer_count.clone();
         let health_block = last_block_health;
+        let s_current_batch = mr2_current_batch.clone();
+        let s_current_phase = mr2_current_phase.clone();
+        let s_pool_id = mr2_pool_id.clone();
+        let s_num_pools = mr2_num_pools.clone();
+        let s_uptime_batches = mr2_uptime_batches.clone();
+        let s_gas_balance_micro = mr2_gas_balance_micro.clone();
+        let s_gas_status = mr2_gas_status.clone();
+        let s_trading_paused = mr2_trading_paused.clone();
+        let s_paused_since_batch = mr2_paused_since_batch.clone();
+        let s_escrow_emm = mr2_escrow_emm.clone();
+        let s_escrow_kay = mr2_escrow_kay.clone();
+        let s_escrow_tee = mr2_escrow_tee.clone();
+        let s_liveness_consecutive = mr2_liveness_consecutive.clone();
+        let s_liveness_attempts = mr2_liveness_attempts.clone();
+        let s_liveness_successes = mr2_liveness_successes.clone();
+        let s_settle_submits = mr2_settle_submits_total.clone();
+        let s_settle_aborts = mr2_settle_aborts_total.clone();
+        let s_pending_mint = mr2_pending_mint.clone();
+
         tokio::spawn(async move {
             let bind_addr = if std::env::var("DEADMKT_HEALTH_EXTERNAL").is_ok() {
                 "0.0.0.0:9292"
@@ -1302,12 +1372,34 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             continue;
                         }
 
-                        let peers = health_peers.load(Ordering::Relaxed);
-                        let block = health_block.load(Ordering::Relaxed);
-                        let body = format!(
-                            "{{\"status\":\"ok\",\"peers\":{},\"block\":{}}}",
-                            peers, block
+                        let body = build_status_v1_json(
+                            &identity_network,
+                            &identity_role,
+                            identity_nft_id,
+                            &identity_trustee,
+                            &identity_beneficiary,
+                            s_uptime_batches.load(Ordering::Relaxed),
+                            s_current_batch.load(Ordering::Relaxed),
+                            s_current_phase.load(Ordering::Relaxed),
+                            s_pool_id.load(Ordering::Relaxed),
+                            s_num_pools.load(Ordering::Relaxed),
+                            health_peers.load(Ordering::Relaxed),
+                            health_block.load(Ordering::Relaxed),
+                            s_gas_balance_micro.load(Ordering::Relaxed),
+                            s_gas_status.load(Ordering::Relaxed),
+                            s_trading_paused.load(Ordering::Relaxed),
+                            s_paused_since_batch.load(Ordering::Relaxed),
+                            s_escrow_emm.load(Ordering::Relaxed),
+                            s_escrow_kay.load(Ordering::Relaxed),
+                            s_escrow_tee.load(Ordering::Relaxed),
+                            s_liveness_consecutive.load(Ordering::Relaxed),
+                            s_liveness_attempts.load(Ordering::Relaxed),
+                            s_liveness_successes.load(Ordering::Relaxed),
+                            s_settle_submits.load(Ordering::Relaxed),
+                            s_settle_aborts.load(Ordering::Relaxed),
+                            s_pending_mint.lock().ok().and_then(|g| g.clone()),
                         );
+
                         let resp = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             body.len(), body
@@ -1446,6 +1538,36 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                         uptime_batches += 1;
                         settle_failed_recent = settle_failed_recent.saturating_sub(1); // natural decay
 
+                        // MR2: publish per-batch state for the status endpoint.
+                        // pool_id is computed from orchestrator at this exact
+                        // boundary so the snapshot stays consistent with the
+                        // phase + batch_id we just transitioned into.
+                        mr2_current_batch.store(new_batch_id, Ordering::Relaxed);
+                        mr2_current_phase.store(
+                            match orchestrator.batch_state.current_phase() {
+                                OrcPhase::Commit => 0,
+                                OrcPhase::Reveal => 1,
+                                OrcPhase::Match => 2,
+                                OrcPhase::Swap => 3,
+                            },
+                            Ordering::Relaxed,
+                        );
+                        mr2_pool_id.store(
+                            orchestrator.batch_state.current_pool_id(config.nft_id),
+                            Ordering::Relaxed,
+                        );
+                        mr2_num_pools.store(num_pools.max(1), Ordering::Relaxed);
+                        mr2_uptime_batches.store(uptime_batches, Ordering::Relaxed);
+                        {
+                            let t = _tracker.lock().unwrap();
+                            let emm = t.get_balance("EMM").map(|b| b.confirmed).unwrap_or(0);
+                            let kay = t.get_balance("KAY").map(|b| b.confirmed).unwrap_or(0);
+                            let tee = t.get_balance("TEE").map(|b| b.confirmed).unwrap_or(0);
+                            mr2_escrow_emm.store(emm, Ordering::Relaxed);
+                            mr2_escrow_kay.store(kay, Ordering::Relaxed);
+                            mr2_escrow_tee.store(tee, Ordering::Relaxed);
+                        }
+
                         // ── SEC-1/SEC-2: Gossip validator maintenance ────
                         gossip_validator.update_batch(new_batch_id);
                         gossip_validator.expire_old_batches();
@@ -1553,6 +1675,16 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                         if new_batch_id % 10 == 0 {
                             if let Some(supra_bal) = fetch_supra_balance(&chain, &config.trustee_address).await {
                                 let (old_status, new_status) = gas_manager.update_balance(supra_bal);
+                                // MR2: publish gas balance + status for status endpoint.
+                                mr2_gas_balance_micro.store(supra_bal, Ordering::Relaxed);
+                                mr2_gas_status.store(
+                                    match new_status {
+                                        deadmkt_gas_manager::GasStatus::Normal => 0,
+                                        deadmkt_gas_manager::GasStatus::Low => 1,
+                                        deadmkt_gas_manager::GasStatus::Critical => 2,
+                                    },
+                                    Ordering::Relaxed,
+                                );
                                 if new_status != old_status {
                                     match new_status {
                                         deadmkt_gas_manager::GasStatus::Low =>
@@ -1643,12 +1775,15 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                             liveness_consecutive_inactive);
                                     }
                                     liveness_consecutive_inactive = 0;
+                                    mr2_liveness_consecutive.store(0, Ordering::Relaxed);
                                 }
                                 Some(false) => {
                                     liveness_consecutive_inactive += 1;
+                                    mr2_liveness_consecutive.store(liveness_consecutive_inactive, Ordering::Relaxed);
                                     eprintln!("[liveness] CRITICAL: node is INACTIVE (nft_id={}, consecutive={})",
                                         config.nft_id, liveness_consecutive_inactive);
                                     liveness_auto_reactivate_attempts += 1;
+                                    mr2_liveness_attempts.store(liveness_auto_reactivate_attempts, Ordering::Relaxed);
                                     match submit_reactivate(
                                         &escrow_client,
                                         &signing_key,
@@ -1662,6 +1797,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                             match chain.wait_for_tx(&hash, Duration::from_secs(20)).await {
                                                 Ok(r) if r.success => {
                                                     liveness_auto_reactivate_successes += 1;
+                                                    mr2_liveness_successes.store(liveness_auto_reactivate_successes, Ordering::Relaxed);
                                                     println!("[liveness] auto-reactivate succeeded ({})", hash);
                                                 }
                                                 Ok(r) => {
@@ -1759,6 +1895,9 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                         if !trading_paused && gas_status == deadmkt_gas_manager::GasStatus::Critical {
                             trading_paused = true;
                             paused_since_batch = new_batch_id;
+                            // MR2: mirror GP1 state to status endpoint.
+                            mr2_trading_paused.store(true, Ordering::Relaxed);
+                            mr2_paused_since_batch.store(new_batch_id, Ordering::Relaxed);
                             eprintln!(
                                 "[gas-pause] Trading paused: gas balance {} SUPRA (Critical). Not submitting commits or reveals for batch {}.",
                                 gas_manager.balance_display(), new_batch_id
@@ -1770,6 +1909,8 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             );
                             trading_paused = false;
                             paused_since_batch = 0;
+                            mr2_trading_paused.store(false, Ordering::Relaxed);
+                            mr2_paused_since_batch.store(0, Ordering::Relaxed);
                         } else if trading_paused {
                             // Still paused -- log once per batch with current balance.
                             eprintln!(
@@ -2080,6 +2221,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             let short = if match_hash.len() >= 12 { &match_hash[..12] } else { &match_hash };
                             mgr.mark_submitted(&match_hash, tx_hash.clone(), block);
                             settle_submits_total += 1;
+                            mr2_settle_submits_total.store(settle_submits_total, Ordering::Relaxed);
                             println!("[settle] submitted {} \u{2192} {}", short, tx_hash);
                         }
                         other => {
@@ -2097,11 +2239,13 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                                 eprintln!("[settle-abort] WARN {} \u{2192} {}", short, code);
                                 settle_aborts_total += 1;
                                 settle_aborts_since_report += 1;
+                                mr2_settle_aborts_total.store(settle_aborts_total, Ordering::Relaxed);
                             }
                             if let SettleResult::RpcError { ref error, .. } = other {
                                 eprintln!("[settle-abort] WARN {} rpc: {}", short, error);
                                 settle_aborts_total += 1;
                                 settle_aborts_since_report += 1;
+                                mr2_settle_aborts_total.store(settle_aborts_total, Ordering::Relaxed);
                             }
 
                             // SP6c: Notify strategy of settlement failure
@@ -2871,6 +3015,171 @@ struct PendingMintFull {
     claimable_at: u64,
 }
 
+/// MR2: pending-mint snapshot served from the status endpoint.
+/// Mirror of PendingMintFull but kept as its own type so the public
+/// shape (visible to operators / LLM consumers) can evolve
+/// independently of the internal SP10 struct.
+#[derive(Debug, Clone)]
+pub(crate) struct Mr2PendingMint {
+    pub emm_amount: u64,
+    pub kay_amount: u64,
+    pub tee_amount: u64,
+    pub supra_cost: u64,
+    pub claimable_at_unix: u64,
+}
+
+/// MR2: build the v1 status JSON body served on :9292 and consumed by
+/// `deadmkt-node status --json`. Pure formatter -- no I/O. Stable schema:
+/// every top-level key documented in `planning/archive/MR2-status-json.md`
+/// is present on every response. Additive-only changes after v1 lands.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_status_v1_json(
+    network: &str,
+    node_role: &str,
+    nft_id: u64,
+    trustee: &str,
+    beneficiary: &str,
+    uptime_batches: u64,
+    current_batch: u64,
+    current_phase_u8: u8,
+    pool_id: u64,
+    num_pools: u64,
+    peers: u64,
+    last_block: u64,
+    gas_balance_micro: u64,
+    gas_status_u8: u8,
+    trading_paused: bool,
+    paused_since_batch: u64,
+    escrow_emm: u64,
+    escrow_kay: u64,
+    escrow_tee: u64,
+    liveness_consecutive: u32,
+    liveness_attempts: u64,
+    liveness_successes: u64,
+    settle_submits_total: u64,
+    settle_aborts_total: u64,
+    pending_mint: Option<Mr2PendingMint>,
+) -> String {
+    let phase_str = match current_phase_u8 {
+        0 => "Commit",
+        1 => "Reveal",
+        2 => "Match",
+        3 => "Swap",
+        _ => "Unknown",
+    };
+    let gas_status_str = match gas_status_u8 {
+        0 => "Normal",
+        1 => "Low",
+        2 => "Critical",
+        _ => "Unknown",
+    };
+    // SUPRA has 8 decimals; format as "X.YYYYYYYY" without a trailing dot
+    // and clip to 2 fractional digits for the operator-friendly form.
+    let gas_balance_supra = {
+        let whole = gas_balance_micro / 100_000_000;
+        let frac = (gas_balance_micro % 100_000_000) / 1_000_000; // 2-decimal precision
+        format!("{}.{:02}", whole, frac)
+    };
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let paused_since_field = if trading_paused {
+        format!("{}", paused_since_batch)
+    } else {
+        "null".to_string()
+    };
+    let (has_pending, pending_obj) = match pending_mint {
+        Some(pm) => {
+            let remaining = (pm.claimable_at_unix as i64 - now_unix as i64).max(0) as u64;
+            let obj = format!(
+                "{{\"emm_amount\":{},\"kay_amount\":{},\"tee_amount\":{},\"supra_cost\":{},\"claimable_at_unix\":{},\"seconds_remaining\":{}}}",
+                pm.emm_amount, pm.kay_amount, pm.tee_amount,
+                pm.supra_cost, pm.claimable_at_unix, remaining
+            );
+            (true, obj)
+        }
+        None => (false, "null".to_string()),
+    };
+
+    format!(
+        "{{\
+\"schema_version\":\"v1\",\
+\"node_running\":true,\
+\"timestamp_unix\":{ts},\
+\"identity\":{{\"network\":\"{network}\",\"node_role\":\"{role}\",\"nft_id\":{nft_id},\"trustee_address\":\"{trustee}\",\"beneficiary_address\":\"{benef}\"}},\
+\"runtime\":{{\"uptime_batches\":{uptime},\"current_batch\":{cur_batch},\"current_phase\":\"{phase}\",\"pool_id\":{pool_id},\"num_pools\":{num_pools},\"peers\":{peers},\"last_block\":{last_block}}},\
+\"gas\":{{\"balance_supra\":\"{gas_supra}\",\"status\":\"{gas_status}\",\"trading_paused\":{paused},\"paused_since_batch\":{paused_since}}},\
+\"mint\":{{\"has_pending_mint\":{has_pending},\"pending\":{pending}}},\
+\"escrow\":{{\"emm\":{emm},\"kay\":{kay},\"tee\":{tee}}},\
+\"liveness\":{{\"consecutive_inactive\":{live_cons},\"auto_reactivate_attempts\":{live_att},\"auto_reactivate_successes\":{live_suc}}},\
+\"settle\":{{\"submits_total\":{settle_sub},\"aborts_total\":{settle_ab}}}\
+}}",
+        ts = now_unix,
+        network = network,
+        role = node_role,
+        nft_id = nft_id,
+        trustee = trustee,
+        benef = beneficiary,
+        uptime = uptime_batches,
+        cur_batch = current_batch,
+        phase = phase_str,
+        pool_id = pool_id,
+        num_pools = num_pools,
+        peers = peers,
+        last_block = last_block,
+        gas_supra = gas_balance_supra,
+        gas_status = gas_status_str,
+        paused = trading_paused,
+        paused_since = paused_since_field,
+        has_pending = has_pending,
+        pending = pending_obj,
+        emm = escrow_emm,
+        kay = escrow_kay,
+        tee = escrow_tee,
+        live_cons = liveness_consecutive,
+        live_att = liveness_attempts,
+        live_suc = liveness_successes,
+        settle_sub = settle_submits_total,
+        settle_ab = settle_aborts_total,
+    )
+}
+
+/// MR2: build the disk-only fallback JSON when no node is running.
+/// Identity fields are read from config.json (so this still works
+/// when the node binary is down). The schema mirrors the running-node
+/// form with `node_running:false` so consumers branch on a single key.
+pub(crate) fn build_status_v1_disk_only_json(
+    network: &str,
+    node_role: &str,
+    nft_id: u64,
+    trustee: &str,
+    beneficiary: &str,
+    error: &str,
+) -> String {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "{{\
+\"schema_version\":\"v1\",\
+\"node_running\":false,\
+\"timestamp_unix\":{ts},\
+\"identity\":{{\"network\":\"{network}\",\"node_role\":\"{role}\",\"nft_id\":{nft_id},\"trustee_address\":\"{trustee}\",\"beneficiary_address\":\"{benef}\"}},\
+\"error\":\"{err}\"\
+}}",
+        ts = now_unix,
+        network = network,
+        role = node_role,
+        nft_id = nft_id,
+        trustee = trustee,
+        benef = beneficiary,
+        err = escape(error),
+    )
+}
+
 async fn fetch_pending_mint_full(
     chain: &deadmkt_chain::client::SupraClient,
     trustee_address: &str,
@@ -3157,4 +3466,186 @@ fn convert_strategy_orders(
             signature,
         }
     }).collect()
+}
+
+// =========================================================================
+// MR2: status endpoint JSON builder tests
+// =========================================================================
+
+#[cfg(test)]
+mod mr2_tests {
+    use super::*;
+
+    fn parse(body: &str) -> serde_json::Value {
+        serde_json::from_str(body).expect("must produce valid JSON")
+    }
+
+    #[test]
+    fn t_mr2_01_running_node_has_all_top_level_keys() {
+        let body = build_status_v1_json(
+            "testnet", "trading", 1234, "0xabc", "0xdef",
+            10, 50, 0, 3, 5, 14, 99,
+            500_000_000, 0, false, 0,
+            100, 200, 300,
+            0, 0, 0,
+            42, 1,
+            None,
+        );
+        let v = parse(&body);
+        for key in [
+            "schema_version", "node_running", "timestamp_unix",
+            "identity", "runtime", "gas", "mint", "escrow",
+            "liveness", "settle",
+        ] {
+            assert!(v.get(key).is_some(), "missing top-level key: {}", key);
+        }
+        assert_eq!(v["schema_version"], "v1");
+        assert_eq!(v["node_running"], true);
+    }
+
+    #[test]
+    fn t_mr2_02_phase_mapping_covers_all_four() {
+        for (u, want) in [(0u8, "Commit"), (1, "Reveal"), (2, "Match"), (3, "Swap")] {
+            let body = build_status_v1_json(
+                "testnet", "trading", 1, "0x", "0x",
+                0, 0, u, 0, 1, 0, 0, 0, 0, false, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, None,
+            );
+            let v = parse(&body);
+            assert_eq!(v["runtime"]["current_phase"], want);
+        }
+    }
+
+    #[test]
+    fn t_mr2_03_gas_status_mapping() {
+        for (u, want) in [(0u8, "Normal"), (1, "Low"), (2, "Critical")] {
+            let body = build_status_v1_json(
+                "testnet", "trading", 1, "0x", "0x",
+                0, 0, 0, 0, 1, 0, 0, 0, u, false, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, None,
+            );
+            let v = parse(&body);
+            assert_eq!(v["gas"]["status"], want);
+        }
+    }
+
+    #[test]
+    fn t_mr2_04_paused_since_null_when_not_paused() {
+        let body = build_status_v1_json(
+            "testnet", "trading", 1, "0x", "0x",
+            0, 0, 0, 0, 1, 0, 0, 0, 0, false, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, None,
+        );
+        let v = parse(&body);
+        assert!(v["gas"]["paused_since_batch"].is_null());
+        assert_eq!(v["gas"]["trading_paused"], false);
+    }
+
+    #[test]
+    fn t_mr2_05_paused_since_populated_when_paused() {
+        let body = build_status_v1_json(
+            "testnet", "trading", 1, "0x", "0x",
+            0, 100, 0, 0, 1, 0, 0, 0, 2, true, 95,
+            0, 0, 0, 0, 0, 0, 0, 0, None,
+        );
+        let v = parse(&body);
+        assert_eq!(v["gas"]["trading_paused"], true);
+        assert_eq!(v["gas"]["paused_since_batch"], 95);
+    }
+
+    #[test]
+    fn t_mr2_06_pending_mint_shape_when_absent() {
+        let body = build_status_v1_json(
+            "testnet", "trading", 1, "0x", "0x",
+            0, 0, 0, 0, 1, 0, 0, 0, 0, false, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, None,
+        );
+        let v = parse(&body);
+        assert_eq!(v["mint"]["has_pending_mint"], false);
+        assert!(v["mint"]["pending"].is_null());
+    }
+
+    #[test]
+    fn t_mr2_07_pending_mint_shape_when_present() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let pm = Mr2PendingMint {
+            emm_amount: 50000, kay_amount: 50000, tee_amount: 50000,
+            supra_cost: 350_000_000,
+            claimable_at_unix: now + 3600,
+        };
+        let body = build_status_v1_json(
+            "testnet", "trading", 1, "0x", "0x",
+            0, 0, 0, 0, 1, 0, 0, 0, 0, false, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, Some(pm),
+        );
+        let v = parse(&body);
+        assert_eq!(v["mint"]["has_pending_mint"], true);
+        let p = &v["mint"]["pending"];
+        assert_eq!(p["emm_amount"], 50000);
+        assert_eq!(p["kay_amount"], 50000);
+        assert_eq!(p["tee_amount"], 50000);
+        assert_eq!(p["supra_cost"], 350_000_000u64);
+        // Seconds remaining is approx 3600; allow a wide tolerance for
+        // CI scheduling jitter.
+        let rem = p["seconds_remaining"].as_u64().unwrap();
+        assert!(rem <= 3600 && rem > 3500, "seconds_remaining={}", rem);
+    }
+
+    #[test]
+    fn t_mr2_08_escrow_raw_units_pass_through() {
+        let body = build_status_v1_json(
+            "testnet", "trading", 1, "0x", "0x",
+            0, 0, 0, 0, 1, 0, 0, 0, 0, false, 0,
+            12345, 67890, 11111,
+            0, 0, 0, 0, 0, None,
+        );
+        let v = parse(&body);
+        assert_eq!(v["escrow"]["emm"], 12345);
+        assert_eq!(v["escrow"]["kay"], 67890);
+        assert_eq!(v["escrow"]["tee"], 11111);
+    }
+
+    #[test]
+    fn t_mr2_09_disk_only_has_node_running_false_and_error() {
+        let body = build_status_v1_disk_only_json(
+            "testnet", "trading", 42, "0xabc", "0xdef",
+            "could not connect: connection refused",
+        );
+        let v = parse(&body);
+        assert_eq!(v["schema_version"], "v1");
+        assert_eq!(v["node_running"], false);
+        assert_eq!(v["identity"]["network"], "testnet");
+        assert_eq!(v["identity"]["nft_id"], 42);
+        assert!(v["error"].as_str().unwrap().contains("connection refused"));
+        // Running-node-only sections must be absent in disk-only form
+        // so consumers branch cleanly on node_running.
+        for key in ["runtime", "gas", "mint", "escrow", "liveness", "settle"] {
+            assert!(v.get(key).is_none(), "disk-only payload must not carry {}", key);
+        }
+    }
+
+    #[test]
+    fn t_mr2_10_disk_only_escapes_quotes_in_error() {
+        let body = build_status_v1_disk_only_json(
+            "testnet", "trading", 0, "", "",
+            r#"weird "quoted" error with \ backslash"#,
+        );
+        // Must still parse as JSON.
+        let v = parse(&body);
+        assert!(v["error"].as_str().unwrap().contains("quoted"));
+    }
+
+    #[test]
+    fn t_mr2_11_gas_balance_formats_supra() {
+        // 4.21000000 SUPRA = 421_000_000 in 8-decimal micro units.
+        let body = build_status_v1_json(
+            "testnet", "trading", 1, "0x", "0x",
+            0, 0, 0, 0, 1, 0, 0,
+            421_000_000, 0, false, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, None,
+        );
+        let v = parse(&body);
+        assert_eq!(v["gas"]["balance_supra"], "4.21");
+    }
 }

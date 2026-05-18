@@ -28,8 +28,14 @@ pub enum Command {
     Run,
     /// Run first-boot setup wizard
     Setup,
-    /// Show node state, batch, balance summary
-    Status,
+    /// Show node state, batch, balance summary.
+    /// With `--json`, emits the MR2 v1 status JSON to stdout (queries
+    /// the running node on 127.0.0.1:9292 and falls back to a disk-only
+    /// payload with `node_running:false` if the node is down).
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     /// Show escrow balances (confirmed + projected)
     Escrow,
     /// Print strategy auth token
@@ -92,10 +98,16 @@ mod tests {
         cli.resolve_command()
     }
 
-    // T_CLI_01: status subcommand
+    // T_CLI_01: status subcommand (no flag)
     #[test]
     fn t_cli_01_status() {
-        assert_eq!(parse(&["deadmkt-node", "status"]), Command::Status);
+        assert_eq!(parse(&["deadmkt-node", "status"]), Command::Status { json: false });
+    }
+
+    // T_CLI_01b: status --json subcommand
+    #[test]
+    fn t_cli_01b_status_json() {
+        assert_eq!(parse(&["deadmkt-node", "status", "--json"]), Command::Status { json: true });
     }
 
     // T_CLI_02: escrow subcommand
