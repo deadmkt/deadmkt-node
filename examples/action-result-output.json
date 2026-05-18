@@ -1,0 +1,71 @@
+{
+  "_comment": "MR3 v1 action-result envelope. Three variants below: tx success, tx failure (chain aborted), read-only success. Consumers always check `success` first, then branch on whether `tx_hash` is present (tx commands) or absent (read-only like `agent-config`).",
+
+  "_example_tx_success": {
+    "schema_version": "v1",
+    "command": "burn-to-escrow",
+    "success": true,
+    "timestamp_unix": 1747700000,
+    "tx_hash": "0xabc1234567890abcdef...",
+    "gas_used": 234,
+    "vm_status": "Executed successfully",
+    "fields": {
+      "to": "escrow",
+      "amount": 10000
+    }
+  },
+
+  "_example_tx_chain_abort": {
+    "schema_version": "v1",
+    "command": "withdraw-claim-all",
+    "success": false,
+    "timestamp_unix": 1747700000,
+    "error": "E_HOLDING_PERIOD_NOT_EXPIRED",
+    "step": "await_tx",
+    "fields": {
+      "nft_id": 42,
+      "holding_period_days": 90
+    }
+  },
+
+  "_example_pre_chain_failure": {
+    "schema_version": "v1",
+    "command": "burn-to-beneficiary",
+    "success": false,
+    "timestamp_unix": 1747700000,
+    "error": "no keystore found -- run `deadmkt-node setup` first",
+    "step": "unlock_keystore",
+    "fields": {
+      "to": "beneficiary",
+      "amount": 5000
+    }
+  },
+
+  "_example_read_only": {
+    "schema_version": "v1",
+    "command": "agent-config",
+    "success": true,
+    "timestamp_unix": 1747700000,
+    "fields": {
+      "strategy_url": "ws://127.0.0.1:9090",
+      "strategy_port": 9090,
+      "strategy_auth_token": "abc123...",
+      "auth_token_length": 64,
+      "requires_restart": false
+    }
+  },
+
+  "_example_rotate_token": {
+    "schema_version": "v1",
+    "command": "agent-config",
+    "success": true,
+    "timestamp_unix": 1747700000,
+    "fields": {
+      "strategy_url": "ws://127.0.0.1:9090",
+      "strategy_port": 9090,
+      "strategy_auth_token": "new-token-just-rotated...",
+      "auth_token_length": 64,
+      "requires_restart": true
+    }
+  }
+}
