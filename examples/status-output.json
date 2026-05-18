@@ -1,0 +1,109 @@
+{
+  "_comment": "MR2 v1 status payload. Two examples below: running node + node down. The actual endpoint emits one or the other based on whether the node binary is up. Consumers branch on the top-level `node_running` key.",
+
+  "_example_running": {
+    "schema_version": "v1",
+    "node_running": true,
+    "timestamp_unix": 1747526400,
+    "identity": {
+      "network": "testnet",
+      "node_role": "trading",
+      "nft_id": 1234,
+      "trustee_address": "0xabc1234567890abcdef1234567890abcdef12345678",
+      "beneficiary_address": "0xdef0987654321abcdef0987654321abcdef098765"
+    },
+    "runtime": {
+      "uptime_batches": 8421,
+      "current_batch": 71203,
+      "current_phase": "Match",
+      "pool_id": 3,
+      "num_pools": 5,
+      "peers": 14,
+      "last_block": 12345678
+    },
+    "gas": {
+      "balance_supra": "4.21",
+      "status": "Normal",
+      "trading_paused": false,
+      "paused_since_batch": null
+    },
+    "mint": {
+      "has_pending_mint": false,
+      "pending": null
+    },
+    "escrow": {
+      "emm": 4500000,
+      "kay": 3200000,
+      "tee": 2800000
+    },
+    "liveness": {
+      "consecutive_inactive": 0,
+      "auto_reactivate_attempts": 0,
+      "auto_reactivate_successes": 0
+    },
+    "settle": {
+      "submits_total": 4129,
+      "aborts_total": 7
+    }
+  },
+
+  "_example_pending_mint": {
+    "schema_version": "v1",
+    "node_running": true,
+    "timestamp_unix": 1747526400,
+    "identity": {
+      "network": "testnet",
+      "node_role": "trading",
+      "nft_id": 1234,
+      "trustee_address": "0xabc...",
+      "beneficiary_address": "0xdef..."
+    },
+    "runtime": {
+      "uptime_batches": 12,
+      "current_batch": 71210,
+      "current_phase": "Commit",
+      "pool_id": 3,
+      "num_pools": 5,
+      "peers": 14,
+      "last_block": 12345678
+    },
+    "gas": {
+      "balance_supra": "4.21",
+      "status": "Normal",
+      "trading_paused": false,
+      "paused_since_batch": null
+    },
+    "mint": {
+      "has_pending_mint": true,
+      "pending": {
+        "emm_amount": 50000,
+        "kay_amount": 50000,
+        "tee_amount": 50000,
+        "supra_cost": 350000000,
+        "claimable_at_unix": 1747600000,
+        "seconds_remaining": 73600
+      }
+    },
+    "escrow": { "emm": 0, "kay": 0, "tee": 0 },
+    "liveness": {
+      "consecutive_inactive": 0,
+      "auto_reactivate_attempts": 0,
+      "auto_reactivate_successes": 0
+    },
+    "settle": { "submits_total": 0, "aborts_total": 0 }
+  },
+
+  "_example_node_down": {
+    "schema_version": "v1",
+    "node_running": false,
+    "timestamp_unix": 1747526400,
+    "identity": {
+      "network": "testnet",
+      "node_role": "trading",
+      "nft_id": 1234,
+      "trustee_address": "0xabc...",
+      "beneficiary_address": "0xdef..."
+    },
+    "error": "could not connect to running node on 127.0.0.1:9292: Connection refused (os error 61)"
+  }
+}

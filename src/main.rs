@@ -120,9 +120,18 @@ async fn main() {
                 }
             }
         }
-        Command::Status => {
+        Command::Status { json } => {
             let dir = data_dir();
             let config_path = dir.join("config.json");
+
+            // MR2: --json takes precedence and goes through the
+            // status endpoint with a disk-only fallback. Exit code
+            // is always 0; consumers branch on `node_running`.
+            if json {
+                run_status_json_and_exit(&config_path).await;
+            }
+
+            // Default human-readable path (unchanged behaviour).
             match NodeConfig::load(&config_path) {
                 Ok(config) => {
                     println!("Network: {:?}", config.network);
@@ -871,6 +880,93 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
 
     println!("{}", result.to_json());
     std::process::exit(if result.success { 0 } else { 1 });
+}
+
+// =========================================================================
+// MR2: `deadmkt-node status --json`
+//
+// Talks to the running node's SP8 health endpoint on 127.0.0.1:9292.
+// On any connection / read / parse failure, falls back to a disk-only
+// payload built from config.json so the consumer (LLM operator,
+// dashboard, etc.) always gets a v1-shaped JSON response. Exit code is
+// always 0 from this path -- consumers branch on `node_running`.
+// =========================================================================
+async fn run_status_json_and_exit(config_path: &std::path::Path) -> ! {
+    // Try the live endpoint first.
+    match fetch_status_v1_from_endpoint().await {
+        Ok(body) => {
+            println!("{}", body);
+            std::process::exit(0);
+        }
+        Err(connect_err) => {
+            // Fall back to disk-only: read config.json (if present) to
+            // populate identity, and emit the v1 disk-only shape. If
+            // config.json is also missing, emit a minimal shell so the
+            // consumer still gets a parseable response.
+            let body = match NodeConfig::load(config_path) {
+                Ok(cfg) => crate::run::build_status_v1_disk_only_json(
+                    &format!("{:?}", cfg.network).to_lowercase(),
+                    // Best-effort role inference: the explicit env flag is
+                    // the only signal a non-running binary has.
+                    if std::env::var("DEADMKT_NO_STRATEGY").map(|v| v == "1").unwrap_or(false) {
+                        "bootstrap"
+                    } else {
+                        "trading"
+                    },
+                    cfg.nft_id,
+                    &cfg.trustee_address,
+                    &cfg.beneficiary_address,
+                    &format!("could not connect to running node on 127.0.0.1:9292: {}", connect_err),
+                ),
+                Err(_) => crate::run::build_status_v1_disk_only_json(
+                    "unknown", "unknown", 0, "", "",
+                    "node not configured and not running",
+                ),
+            };
+            println!("{}", body);
+            std::process::exit(0);
+        }
+    }
+}
+
+/// MR2: hand-written minimal HTTP/1.0 GET to the SP8 endpoint.
+/// Avoids pulling in `reqwest` / `hyper` for a 15-line client.
+async fn fetch_status_v1_from_endpoint() -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let timeout = std::time::Duration::from_secs(1);
+    let stream = tokio::time::timeout(
+        timeout,
+        tokio::net::TcpStream::connect("127.0.0.1:9292"),
+    )
+    .await
+    .map_err(|_| "connect timeout".to_string())?
+    .map_err(|e| format!("connect: {}", e))?;
+
+    let mut stream = stream;
+    let req = b"GET /status HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    tokio::time::timeout(timeout, stream.write_all(req))
+        .await
+        .map_err(|_| "write timeout".to_string())?
+        .map_err(|e| format!("write: {}", e))?;
+
+    let mut buf = Vec::with_capacity(8192);
+    tokio::time::timeout(timeout, stream.read_to_end(&mut buf))
+        .await
+        .map_err(|_| "read timeout".to_string())?
+        .map_err(|e| format!("read: {}", e))?;
+
+    // Split on the HTTP header/body boundary.
+    let pos = buf.windows(4).position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| "no body delimiter".to_string())?;
+    let body = String::from_utf8_lossy(&buf[pos + 4..]).into_owned();
+
+    // Sanity check: ensure the response is JSON-shaped before handing back.
+    let trimmed = body.trim();
+    if !trimmed.starts_with('{') {
+        return Err(format!("non-JSON body: {}", trimmed.chars().take(80).collect::<String>()));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// MR1b: prompt the operator for the keystore password on stderr,
