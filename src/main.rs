@@ -14,9 +14,10 @@ mod setup_bridge;
 mod token_worker;
 
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{BurnTarget, Cli, Command, WithdrawAction};
 use deadmkt_config::{default_contract_addresses, is_first_boot, Network, NodeConfig};
 use deadmkt_keystore::{detect_keystore_mode, KeystoreMode};
+use deadmkt_setup::ChainClient;
 use std::path::PathBuf;
 
 fn data_dir() -> PathBuf {
@@ -725,6 +726,17 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Command::Withdraw { action } => {
+            let json = action.json();
+            let password_stdin = action.password_stdin();
+            run_mr3_withdraw_and_exit(action, json, password_stdin).await;
+        }
+        Command::Burn { to, amount, json, password_stdin } => {
+            run_mr3_burn_and_exit(to, amount, json, password_stdin).await;
+        }
+        Command::AgentConfig { rotate_token, json } => {
+            run_mr3_agent_config_and_exit(rotate_token, json).await;
+        }
     }
 }
 
@@ -1050,4 +1062,454 @@ async fn run_restore_setup_and_exit(data_dir: &std::path::Path) -> ! {
     let result = run_setup_noninteractive_restore(&password, network, &chain, data_dir).await;
     println!("{}", result.to_json());
     std::process::exit(if result.success { 0 } else { 1 });
+}
+
+// =========================================================================
+// MR3: action commands (withdraw / burn / agent-config) with --json
+// envelope
+//
+// Stable v1 action-result envelope mirroring MR2's status envelope style.
+// Every tx command goes through the configured SupraSetupClient + the
+// ChainClient trait's submit_* methods (added in MR3) so the chain side
+// stays in one place. Read-only `agent-config` touches only config.json.
+// =========================================================================
+
+#[derive(Debug)]
+struct ActionResultBuilder {
+    command: String,
+    fields: serde_json::Value,
+}
+
+impl ActionResultBuilder {
+    fn new(command: &str, fields: serde_json::Value) -> Self {
+        Self { command: command.to_string(), fields }
+    }
+
+    fn success_tx(&self, tx: &deadmkt_setup::TxResultInfo) -> String {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let body = serde_json::json!({
+            "schema_version": "v1",
+            "command": self.command,
+            "success": true,
+            "timestamp_unix": ts,
+            "tx_hash": tx.tx_hash,
+            "gas_used": tx.gas_used,
+            "vm_status": tx.vm_status,
+            "fields": self.fields,
+        });
+        serde_json::to_string(&body).unwrap_or_else(|_| "{}".into())
+    }
+
+    fn success_read_only(&self) -> String {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let body = serde_json::json!({
+            "schema_version": "v1",
+            "command": self.command,
+            "success": true,
+            "timestamp_unix": ts,
+            "fields": self.fields,
+        });
+        serde_json::to_string(&body).unwrap_or_else(|_| "{}".into())
+    }
+
+    fn failure(&self, step: &str, error: impl ToString) -> String {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let body = serde_json::json!({
+            "schema_version": "v1",
+            "command": self.command,
+            "success": false,
+            "timestamp_unix": ts,
+            "error": error.to_string(),
+            "step": step,
+            "fields": self.fields,
+        });
+        serde_json::to_string(&body).unwrap_or_else(|_| "{}".into())
+    }
+}
+
+/// MR3: read keystore password from stdin (one line) when --password-stdin
+/// is set, otherwise prompt interactively on stderr. Empty input is an
+/// error.
+fn read_action_password(from_stdin: bool) -> Result<String, String> {
+    if from_stdin {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        let n = stdin.lock().read_line(&mut line)
+            .map_err(|e| format!("read stdin: {}", e))?;
+        if n == 0 {
+            return Err("stdin closed without password input".into());
+        }
+        let trimmed = line.trim_end_matches(|c| c == '\n' || c == '\r').to_string();
+        if trimmed.is_empty() { return Err("empty password".into()); }
+        Ok(trimmed)
+    } else {
+        prompt_keystore_password()
+    }
+}
+
+/// MR3: shared bring-up for action commands. Loads config, unlocks
+/// keystore (interactive prompt or --password-stdin), constructs a
+/// SupraSetupClient with `set_signer` called, returns (config, chain).
+/// On any failure, returns an Err with (step, error) so callers can
+/// emit a clean ActionResult envelope.
+async fn mr3_load_signed_chain(
+    password_stdin: bool,
+) -> Result<(NodeConfig, setup_bridge::SupraSetupClient), (String, String)> {
+    let dir = data_dir();
+    let config_path = dir.join("config.json");
+    let keystore_path = dir.join("keystore.json");
+
+    let config = NodeConfig::load(&config_path)
+        .map_err(|e| ("load_config".to_string(), format!("{}", e)))?;
+
+    let mode = detect_keystore_mode(&keystore_path).unwrap_or(KeystoreMode::Missing);
+    let (signing_key, public_key) = match mode {
+        KeystoreMode::Insecure => deadmkt_keystore::load_keystore_insecure(&keystore_path)
+            .map_err(|e| ("unlock_keystore".to_string(), format!("{}", e)))?,
+        KeystoreMode::Encrypted => {
+            let password = read_action_password(password_stdin)
+                .map_err(|e| ("prompt_password".to_string(), e))?;
+            deadmkt_keystore::load_keystore(&keystore_path, &password)
+                .map_err(|e| ("unlock_keystore".to_string(), format!("{}", e)))?
+        }
+        KeystoreMode::Missing => {
+            return Err((
+                "unlock_keystore".to_string(),
+                "no keystore found -- run `deadmkt-node setup` first".to_string(),
+            ));
+        }
+    };
+
+    let rpc_url = config
+        .rpc_urls
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "https://rpc-testnet.supra.com".into());
+    let contract_addr = config.contracts.escrow.clone();
+    let mut chain = setup_bridge::SupraSetupClient::new(vec![rpc_url], contract_addr);
+    let chain_id = match config.network {
+        Network::Testnet => 6u8,
+        Network::Mainnet => 1u8,
+    };
+    chain.set_gas_config(chain_id, config.max_gas_amount, config.gas_unit_price);
+    chain.set_signer(
+        signing_key.as_bytes(),
+        public_key.as_bytes(),
+        &config.trustee_address,
+    );
+
+    Ok((config, chain))
+}
+
+async fn run_mr3_withdraw_and_exit(
+    action: WithdrawAction,
+    json: bool,
+    password_stdin: bool,
+) -> ! {
+    let command_name = match &action {
+        WithdrawAction::Rushed { .. } => "withdraw-rushed",
+        WithdrawAction::RequestRushed { .. } => "withdraw-request-rushed",
+        WithdrawAction::CancelRushed { .. } => "withdraw-cancel-rushed",
+        WithdrawAction::ClaimAll { .. } => "withdraw-claim-all",
+        WithdrawAction::StartHolding { .. } => "withdraw-start-holding",
+        WithdrawAction::CancelHolding { .. } => "withdraw-cancel-holding",
+    };
+    let builder = ActionResultBuilder::new(command_name, serde_json::json!({}));
+
+    let (config, chain) = match mr3_load_signed_chain(password_stdin).await {
+        Ok(v) => v,
+        Err((step, e)) => {
+            emit_action_failure(&builder, &step, &e, json);
+            std::process::exit(1);
+        }
+    };
+
+    // Pre-fill fields with config-derived info for the action.
+    let mut fields = serde_json::Map::new();
+    fields.insert("nft_id".into(), serde_json::json!(config.nft_id));
+    if matches!(action,
+        WithdrawAction::StartHolding { .. } | WithdrawAction::CancelHolding { .. })
+    {
+        fields.insert("holding_period_days".into(),
+                      serde_json::json!(config.withdrawal_rules.holding_period_days));
+    }
+    let builder = ActionResultBuilder::new(command_name, serde_json::Value::Object(fields));
+
+    let tx_result = match action {
+        WithdrawAction::Rushed { .. } => chain.submit_rushed_withdrawal_as_supra(config.nft_id).await,
+        WithdrawAction::RequestRushed { .. } => chain.submit_request_rushed_withdrawal(config.nft_id).await,
+        WithdrawAction::CancelRushed { .. } => chain.submit_cancel_rushed_withdrawal(config.nft_id).await,
+        WithdrawAction::ClaimAll { .. } => chain.submit_claim_all_as_supra(config.nft_id).await,
+        WithdrawAction::StartHolding { .. } => chain.submit_start_holding_period(config.nft_id).await,
+        WithdrawAction::CancelHolding { .. } => chain.submit_cancel_holding_period(config.nft_id).await,
+    };
+
+    emit_action_tx_result(&builder, tx_result, json);
+}
+
+async fn run_mr3_burn_and_exit(
+    to: BurnTarget,
+    amount: u64,
+    json: bool,
+    password_stdin: bool,
+) -> ! {
+    let (target_label, command_name) = match to {
+        BurnTarget::Escrow => ("escrow", "burn-to-escrow"),
+        BurnTarget::Beneficiary => ("beneficiary", "burn-to-beneficiary"),
+    };
+    let fields = serde_json::json!({ "to": target_label, "amount": amount });
+    let builder = ActionResultBuilder::new(command_name, fields);
+
+    let (_config, chain) = match mr3_load_signed_chain(password_stdin).await {
+        Ok(v) => v,
+        Err((step, e)) => {
+            emit_action_failure(&builder, &step, &e, json);
+            std::process::exit(1);
+        }
+    };
+
+    let tx_result = match to {
+        BurnTarget::Escrow => chain.submit_burn_from_escrow(amount).await,
+        BurnTarget::Beneficiary => chain.submit_burn_to_beneficiary(amount).await,
+    };
+    emit_action_tx_result(&builder, tx_result, json);
+}
+
+async fn run_mr3_agent_config_and_exit(rotate_token: bool, json: bool) -> ! {
+    let dir = data_dir();
+    let config_path = dir.join("config.json");
+
+    // agent-config never needs the keystore. Read-only path on a missing
+    // config still emits a clean failure envelope.
+    let mut config = match NodeConfig::load(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            let builder = ActionResultBuilder::new("agent-config", serde_json::json!({}));
+            emit_action_failure(&builder, "load_config", e, json);
+            std::process::exit(1);
+        }
+    };
+
+    let mut requires_restart = false;
+    if rotate_token {
+        let new_token = deadmkt_config::generate_strategy_auth_token();
+        config.strategy_auth_token = new_token;
+        if let Err(e) = config.save(&config_path) {
+            let builder = ActionResultBuilder::new(
+                "agent-config",
+                serde_json::json!({ "rotate_token": true }),
+            );
+            emit_action_failure(&builder, "write_config", e, json);
+            std::process::exit(1);
+        }
+        requires_restart = true;
+    }
+
+    let strategy_url = format!("ws://127.0.0.1:{}", config.strategy_port);
+    let auth_len = config.strategy_auth_token.len();
+    let fields = serde_json::json!({
+        "strategy_url": strategy_url,
+        "strategy_port": config.strategy_port,
+        "strategy_auth_token": config.strategy_auth_token,
+        "auth_token_length": auth_len,
+        "requires_restart": requires_restart,
+    });
+
+    if json {
+        let body = ActionResultBuilder::new("agent-config", fields.clone()).success_read_only();
+        println!("{}", body);
+    } else {
+        println!("Strategy bridge config:");
+        println!("  URL:        {}", strategy_url);
+        println!("  Port:       {}", config.strategy_port);
+        println!("  Auth token: {} ({} chars)", config.strategy_auth_token, auth_len);
+        if requires_restart {
+            println!("\n  Token rotated. Restart the node to apply.");
+        }
+    }
+    std::process::exit(0);
+}
+
+fn emit_action_tx_result(
+    builder: &ActionResultBuilder,
+    tx_result: Result<deadmkt_setup::TxResultInfo, deadmkt_setup::SetupError>,
+    json: bool,
+) -> ! {
+    match tx_result {
+        Ok(tx) if tx.success => {
+            let body = builder.success_tx(&tx);
+            if json {
+                println!("{}", body);
+            } else {
+                println!("{} succeeded (tx={}, gas={})",
+                    builder.command, tx.tx_hash, tx.gas_used);
+            }
+            std::process::exit(0);
+        }
+        Ok(tx) => {
+            // Chain accepted the tx but execution aborted (e.g. E_HOLDING_NOT_EXPIRED).
+            let body = builder.failure("await_tx", &tx.vm_status);
+            if json {
+                println!("{}", body);
+            } else {
+                eprintln!("{} failed: {} (tx={})",
+                    builder.command, tx.vm_status, tx.tx_hash);
+            }
+            std::process::exit(1);
+        }
+        Err(e) => {
+            let body = builder.failure("submit_tx", e);
+            if json {
+                println!("{}", body);
+            } else {
+                eprintln!("{} error: {}",
+                    builder.command,
+                    serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|v| v.get("error").and_then(|x| x.as_str()).map(String::from))
+                        .unwrap_or_default(),
+                );
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn emit_action_failure(
+    builder: &ActionResultBuilder,
+    step: &str,
+    error: impl ToString,
+    json: bool,
+) {
+    let body = builder.failure(step, error);
+    if json {
+        println!("{}", body);
+    } else {
+        eprintln!("{} failed at {}: {}",
+            builder.command,
+            step,
+            serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|x| x.as_str()).map(String::from))
+                .unwrap_or_default(),
+        );
+    }
+}
+
+// =========================================================================
+// MR3: ActionResult envelope tests
+// =========================================================================
+
+#[cfg(test)]
+mod mr3_envelope_tests {
+    use super::*;
+    use deadmkt_setup::TxResultInfo;
+
+    fn parse(body: &str) -> serde_json::Value {
+        serde_json::from_str(body).expect("envelope must produce valid JSON")
+    }
+
+    #[test]
+    fn t_mr3_env_01_success_tx_shape() {
+        let builder = ActionResultBuilder::new(
+            "burn-to-escrow",
+            serde_json::json!({ "to": "escrow", "amount": 1000 }),
+        );
+        let tx = TxResultInfo {
+            success: true,
+            gas_used: 234,
+            vm_status: "Executed successfully".into(),
+            tx_hash: "0xdeadbeef".into(),
+        };
+        let v = parse(&builder.success_tx(&tx));
+        assert_eq!(v["schema_version"], "v1");
+        assert_eq!(v["command"], "burn-to-escrow");
+        assert_eq!(v["success"], true);
+        assert_eq!(v["tx_hash"], "0xdeadbeef");
+        assert_eq!(v["gas_used"], 234);
+        assert_eq!(v["vm_status"], "Executed successfully");
+        assert_eq!(v["fields"]["to"], "escrow");
+        assert_eq!(v["fields"]["amount"], 1000);
+        assert!(v["timestamp_unix"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn t_mr3_env_02_success_read_only_omits_tx_fields() {
+        let builder = ActionResultBuilder::new(
+            "agent-config",
+            serde_json::json!({ "strategy_port": 9090 }),
+        );
+        let v = parse(&builder.success_read_only());
+        assert_eq!(v["schema_version"], "v1");
+        assert_eq!(v["command"], "agent-config");
+        assert_eq!(v["success"], true);
+        assert!(v.get("tx_hash").is_none());
+        assert!(v.get("gas_used").is_none());
+        assert!(v.get("vm_status").is_none());
+        assert_eq!(v["fields"]["strategy_port"], 9090);
+    }
+
+    #[test]
+    fn t_mr3_env_03_failure_shape_carries_step_and_error() {
+        let builder = ActionResultBuilder::new(
+            "withdraw-claim-all",
+            serde_json::json!({ "nft_id": 42 }),
+        );
+        let v = parse(&builder.failure("await_tx", "E_HOLDING_PERIOD_NOT_EXPIRED"));
+        assert_eq!(v["schema_version"], "v1");
+        assert_eq!(v["command"], "withdraw-claim-all");
+        assert_eq!(v["success"], false);
+        assert_eq!(v["step"], "await_tx");
+        assert_eq!(v["error"], "E_HOLDING_PERIOD_NOT_EXPIRED");
+        assert_eq!(v["fields"]["nft_id"], 42);
+    }
+
+    #[test]
+    fn t_mr3_env_04_command_name_round_trips_through_failure() {
+        // Failure on a tx submission still labels with the correct command.
+        let builder = ActionResultBuilder::new(
+            "withdraw-rushed",
+            serde_json::json!({ "nft_id": 7 }),
+        );
+        let v = parse(&builder.failure("submit_tx", "rpc connection refused"));
+        assert_eq!(v["command"], "withdraw-rushed");
+        assert_eq!(v["step"], "submit_tx");
+        assert!(v["error"].as_str().unwrap().contains("rpc"));
+    }
+
+    #[test]
+    fn t_mr3_env_05_failure_with_empty_fields_object() {
+        let builder = ActionResultBuilder::new(
+            "burn-to-beneficiary",
+            serde_json::json!({}),
+        );
+        let v = parse(&builder.failure("load_config", "config.json not found"));
+        // Empty `fields` is still serialised as `{}`, not omitted.
+        assert!(v["fields"].is_object());
+        assert_eq!(v["fields"].as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn t_mr3_env_06_tx_hash_passes_through_unchanged() {
+        let builder = ActionResultBuilder::new("burn-to-escrow", serde_json::json!({}));
+        let tx = TxResultInfo {
+            success: true,
+            gas_used: 100,
+            vm_status: "ok".into(),
+            tx_hash: "0xabc123".into(),
+        };
+        let v = parse(&builder.success_tx(&tx));
+        // Hash should be exactly what we set, no rewriting.
+        assert_eq!(v["tx_hash"], "0xabc123");
+    }
 }

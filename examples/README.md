@@ -24,6 +24,16 @@ deadmkt-node --config setup.json
 
 `--features production` on the keystore crate disables the insecure (unencrypted) keystore path entirely. Scale-test and dev builds leave it available.
 
+## Action commands (MR3)
+
+`action-result-output.json` shows the v1 envelope emitted by every action command when `--json` is set: `withdraw {rushed,request-rushed,cancel-rushed,claim-all,start-holding,cancel-holding}`, `burn --to escrow|beneficiary`, `agent-config [--rotate-token]`. Five sample shapes: tx success, chain-abort failure, pre-chain failure (e.g. missing keystore), read-only success, and rotated token. Consumers check `success` first, then branch on whether `tx_hash` is present.
+
+Each tx command supports `--password-stdin` for scripting: `echo $PW | deadmkt-node burn --to escrow --amount 10000 --password-stdin --json`.
+
+## Status endpoint (MR2)
+
+`status-output.json` shows the v1 status envelope.
+
 ## ws_demo.rs
 
 Tiny example showing how to connect a strategy over the WebSocket bridge.

@@ -333,7 +333,8 @@ impl SupraSetupClient {
                 return Ok(TxResultInfo {
                     success: false,
                     gas_used: 0,
-                    vm_status: format!("HTTP {} — {}", status, &body[..body.len().min(200)]),
+                    vm_status: format!("HTTP {} \u{2014} {}", status, &body[..body.len().min(200)]),
+                    tx_hash: String::new(),
                 });
             }
         };
@@ -344,6 +345,7 @@ impl SupraSetupClient {
                 success,
                 gas_used: 0,
                 vm_status: status_str.to_string(),
+                tx_hash: String::new(),
             });
         }
 
@@ -363,6 +365,7 @@ impl SupraSetupClient {
                 success: false,
                 gas_used: 0,
                 vm_status: msg.to_string(),
+                tx_hash: String::new(),
             })
         }
     }
@@ -398,6 +401,7 @@ impl SupraSetupClient {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or(status_str)
                                         .to_string(),
+                                    tx_hash: tx_hash.to_string(),
                                 });
                             }
                         }
@@ -412,6 +416,7 @@ impl SupraSetupClient {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string(),
+                                tx_hash: tx_hash.to_string(),
                             });
                         }
                     }
@@ -883,6 +888,80 @@ impl ChainClient for SupraSetupClient {
                     .map_err(|e| SetupError::ChainError(e.to_string()))?,
             ];
             self.submit_entry_function("tokens", "donate_dust", args).await
+        })
+    }
+
+    // ------------------------------------------------------------------
+    // MR3: withdrawal entry functions (SUPRA-only exits).
+    // All six take only nft_id (beneficiary signer is the configured
+    // signing key). Self-funded operators where trustee == beneficiary
+    // can call these directly with the node keystore; otherwise the
+    // contract returns E_NOT_BENEFICIARY.
+    // ------------------------------------------------------------------
+
+    fn submit_request_rushed_withdrawal(
+        &self,
+        nft_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            let args = vec![bcs::to_bytes(&nft_id)
+                .map_err(|e| SetupError::ChainError(e.to_string()))?];
+            self.submit_entry_function("escrow", "request_rushed_withdrawal", args).await
+        })
+    }
+
+    fn submit_cancel_rushed_withdrawal(
+        &self,
+        nft_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            let args = vec![bcs::to_bytes(&nft_id)
+                .map_err(|e| SetupError::ChainError(e.to_string()))?];
+            self.submit_entry_function("escrow", "cancel_rushed_withdrawal", args).await
+        })
+    }
+
+    fn submit_rushed_withdrawal_as_supra(
+        &self,
+        nft_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            let args = vec![bcs::to_bytes(&nft_id)
+                .map_err(|e| SetupError::ChainError(e.to_string()))?];
+            self.submit_entry_function("tokens", "rushed_withdrawal_as_supra", args).await
+        })
+    }
+
+    fn submit_start_holding_period(
+        &self,
+        nft_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            let args = vec![bcs::to_bytes(&nft_id)
+                .map_err(|e| SetupError::ChainError(e.to_string()))?];
+            self.submit_entry_function("escrow", "start_holding_period", args).await
+        })
+    }
+
+    fn submit_cancel_holding_period(
+        &self,
+        nft_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            let args = vec![bcs::to_bytes(&nft_id)
+                .map_err(|e| SetupError::ChainError(e.to_string()))?];
+            self.submit_entry_function("escrow", "cancel_holding_period", args).await
+        })
+    }
+
+    fn submit_claim_all_as_supra(
+        &self,
+        nft_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            let args = vec![bcs::to_bytes(&nft_id)
+                .map_err(|e| SetupError::ChainError(e.to_string()))?];
+            self.submit_entry_function("tokens", "claim_all_as_supra", args).await
         })
     }
 }

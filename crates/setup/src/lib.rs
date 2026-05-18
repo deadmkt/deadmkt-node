@@ -84,11 +84,15 @@ pub struct NftConfigInfo {
     pub admin: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TxResultInfo {
     pub success: bool,
     pub gas_used: u64,
     pub vm_status: String,
+    /// MR3: on-chain transaction hash for callers that need to surface
+    /// it (action commands, indexer integration). Empty string when the
+    /// submission path didn't observe a hash (e.g. mock test client).
+    pub tx_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +260,78 @@ pub trait ChainClient: Send + Sync {
         _amount: u64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
         Box::pin(async { Err(SetupError::ChainError("submit_donate_dust not implemented".into())) })
+    }
+
+    // -----------------------------------------------------------------
+    // MR3: withdrawal entry functions (SUPRA-only exits)
+    //
+    // All six take nft_id implicitly via the configured signer. The
+    // per-token wallet paths (escrow::execute_rushed_withdrawal,
+    // escrow::claim_all) are NOT exposed -- DMKT13 contract item
+    // C-NO-PT-WD removes them entirely. Tokens never pass through a
+    // wallet; beneficiaries exit as SUPRA via tokens.move.
+    // -----------------------------------------------------------------
+
+    /// Call escrow::request_rushed_withdrawal(nft_id). Starts the rushed
+    /// grace clock; after `rushed_grace_batches` elapses, the operator
+    /// can call `rushed_withdrawal_as_supra` to actually exit.
+    /// IMPORTANT: signer must be the beneficiary for the given nft_id.
+    /// On a self-funded node trustee == beneficiary and the trustee
+    /// keystore works directly; otherwise the contract returns
+    /// E_NOT_BENEFICIARY and the CLI surfaces it in the JSON envelope.
+    fn submit_request_rushed_withdrawal(
+        &self,
+        _nft_id: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async { Err(SetupError::ChainError("submit_request_rushed_withdrawal not implemented".into())) })
+    }
+
+    /// Call escrow::cancel_rushed_withdrawal(nft_id). Backs out of a
+    /// pending rushed request before grace expires.
+    fn submit_cancel_rushed_withdrawal(
+        &self,
+        _nft_id: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async { Err(SetupError::ChainError("submit_cancel_rushed_withdrawal not implemented".into())) })
+    }
+
+    /// Call tokens::rushed_withdrawal_as_supra(nft_id). Burns the max
+    /// equal triple from escrow and returns SUPRA to the beneficiary.
+    /// Requires a prior request_rushed_withdrawal + elapsed grace.
+    fn submit_rushed_withdrawal_as_supra(
+        &self,
+        _nft_id: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async { Err(SetupError::ChainError("submit_rushed_withdrawal_as_supra not implemented".into())) })
+    }
+
+    /// Call escrow::start_holding_period(nft_id). Begins the end-of-life
+    /// holding countdown. After `holding_period_days` elapses, the
+    /// operator can call `claim_all_as_supra`.
+    fn submit_start_holding_period(
+        &self,
+        _nft_id: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async { Err(SetupError::ChainError("submit_start_holding_period not implemented".into())) })
+    }
+
+    /// Call escrow::cancel_holding_period(nft_id). Returns the node to
+    /// active state from the holding-period countdown.
+    fn submit_cancel_holding_period(
+        &self,
+        _nft_id: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async { Err(SetupError::ChainError("submit_cancel_holding_period not implemented".into())) })
+    }
+
+    /// Call tokens::claim_all_as_supra(nft_id). Burns the max equal
+    /// triple from escrow after holding period expires and returns
+    /// SUPRA to the beneficiary.
+    fn submit_claim_all_as_supra(
+        &self,
+        _nft_id: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async { Err(SetupError::ChainError("submit_claim_all_as_supra not implemented".into())) })
     }
 }
 
@@ -1122,12 +1198,14 @@ mod tests {
                     success: true,
                     gas_used: 500,
                     vm_status: "ok".into(),
+                    tx_hash: String::new(),
                 },
                 total_minted: 42,
                 register_result: TxResultInfo {
                     success: true,
                     gas_used: 800,
                     vm_status: "ok".into(),
+                    tx_hash: String::new(),
                 },
             }
         }
@@ -1195,19 +1273,19 @@ mod tests {
         fn submit_deposit(&self, _metadata_address: &str, _amount: u64)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>
         {
-            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 200, vm_status: "ok".into() }) })
+            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 200, vm_status: "ok".into(), tx_hash: String::new() }) })
         }
 
         fn submit_request_mint(&self, _m: u64, _k: u64, _t: u64)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>
         {
-            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 400, vm_status: "ok".into() }) })
+            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 400, vm_status: "ok".into(), tx_hash: String::new() }) })
         }
 
         fn submit_claim_mint(&self)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>
         {
-            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 500, vm_status: "ok".into() }) })
+            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 500, vm_status: "ok".into(), tx_hash: String::new() }) })
         }
 
         // #19: override default (which returns 0). The wizard's first-mint
@@ -1237,13 +1315,13 @@ mod tests {
         fn submit_lock_from_escrow(&self, _symbol: u8, _amount: u64, _duration: u64)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>
         {
-            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 350, vm_status: "ok".into() }) })
+            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 350, vm_status: "ok".into(), tx_hash: String::new() }) })
         }
 
         fn submit_unlock_to_escrow(&self, _lock_index: u64)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>
         {
-            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 300, vm_status: "ok".into() }) })
+            Box::pin(async { Ok(TxResultInfo { success: true, gas_used: 300, vm_status: "ok".into(), tx_hash: String::new() }) })
         }
     }
 

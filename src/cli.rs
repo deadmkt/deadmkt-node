@@ -75,6 +75,116 @@ pub enum Command {
         #[arg(long, default_value_t = 10)]
         rushed_grace_batches: u64,
     },
+    /// MR3: SUPRA-only withdrawal flows. Beneficiary signer required;
+    /// on a self-funded node trustee == beneficiary so the node keystore
+    /// works. Otherwise the contract returns E_NOT_BENEFICIARY.
+    Withdraw {
+        #[command(subcommand)]
+        action: WithdrawAction,
+    },
+    /// MR3: burn equal triples from escrow back to SUPRA.
+    Burn {
+        /// Burn target: SUPRA returns to escrow (top up gas) or to the
+        /// beneficiary wallet (profit takeout).
+        #[arg(long, value_enum)]
+        to: BurnTarget,
+        /// Amount of each token (EMM/KAY/TEE) to burn, in raw units
+        /// (5-decimal). The contract enforces equal triples.
+        #[arg(long)]
+        amount: u64,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// MR3: show or rotate the strategy bridge config so an external
+    /// agent (Python bot, dashboard, LLM operator) can connect.
+    AgentConfig {
+        /// Generate a new strategy auth token and rewrite config.json.
+        /// Requires node restart to take effect.
+        #[arg(long)]
+        rotate_token: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// MR3: withdrawal sub-actions. SUPRA-only by design -- the per-token
+/// wallet paths (`execute_rushed_withdrawal`, per-token `claim_all`)
+/// are being removed in DMKT13 (contract item C-NO-PT-WD).
+///
+/// Each variant carries its own `--json` and `--password-stdin` flags
+/// so the usual `cmd subcmd --flag` invocation works (clap parses
+/// flags only against the current subcommand level).
+#[derive(Subcommand, Debug, Clone, PartialEq)]
+pub enum WithdrawAction {
+    /// Execute a pending rushed withdrawal as SUPRA. Requires a prior
+    /// `request-rushed` + elapsed `rushed_grace_batches`.
+    Rushed {
+        #[arg(long)] json: bool,
+        #[arg(long)] password_stdin: bool,
+    },
+    /// Start the rushed grace clock. After it elapses, run `rushed` to
+    /// actually exit. Operator must have `rushed_withdrawal_enabled`.
+    RequestRushed {
+        #[arg(long)] json: bool,
+        #[arg(long)] password_stdin: bool,
+    },
+    /// Cancel a pending rushed-withdrawal request.
+    CancelRushed {
+        #[arg(long)] json: bool,
+        #[arg(long)] password_stdin: bool,
+    },
+    /// Execute `claim_all_as_supra` -- end-of-life exit. Requires a
+    /// prior `start-holding` + elapsed `holding_period_days`.
+    ClaimAll {
+        #[arg(long)] json: bool,
+        #[arg(long)] password_stdin: bool,
+    },
+    /// Begin the end-of-life holding period.
+    StartHolding {
+        #[arg(long)] json: bool,
+        #[arg(long)] password_stdin: bool,
+    },
+    /// Cancel an active holding period and return to trading state.
+    CancelHolding {
+        #[arg(long)] json: bool,
+        #[arg(long)] password_stdin: bool,
+    },
+}
+
+impl WithdrawAction {
+    pub fn json(&self) -> bool {
+        match self {
+            Self::Rushed { json, .. }
+            | Self::RequestRushed { json, .. }
+            | Self::CancelRushed { json, .. }
+            | Self::ClaimAll { json, .. }
+            | Self::StartHolding { json, .. }
+            | Self::CancelHolding { json, .. } => *json,
+        }
+    }
+    pub fn password_stdin(&self) -> bool {
+        match self {
+            Self::Rushed { password_stdin, .. }
+            | Self::RequestRushed { password_stdin, .. }
+            | Self::CancelRushed { password_stdin, .. }
+            | Self::ClaimAll { password_stdin, .. }
+            | Self::StartHolding { password_stdin, .. }
+            | Self::CancelHolding { password_stdin, .. } => *password_stdin,
+        }
+    }
+}
+
+/// MR3: target for `burn` -- where the SUPRA produced by burning the
+/// equal triple ends up.
+#[derive(clap::ValueEnum, Debug, Clone, PartialEq)]
+pub enum BurnTarget {
+    /// SUPRA returns to the trustee's escrow. Use to top up gas without
+    /// withdrawing.
+    Escrow,
+    /// SUPRA flows to the beneficiary wallet. Profit takeout.
+    Beneficiary,
 }
 
 impl Cli {
@@ -138,5 +248,104 @@ mod tests {
     #[test]
     fn test_setup() {
         assert_eq!(parse(&["deadmkt-node", "setup"]), Command::Setup);
+    }
+
+    // ---- MR3: action commands ----
+
+    #[test]
+    fn t_mr3_cli_01_burn_to_escrow() {
+        let cmd = parse(&["deadmkt-node", "burn", "--to", "escrow", "--amount", "1000", "--json"]);
+        match cmd {
+            Command::Burn { to, amount, json, password_stdin } => {
+                assert_eq!(to, BurnTarget::Escrow);
+                assert_eq!(amount, 1000);
+                assert!(json);
+                assert!(!password_stdin);
+            }
+            other => panic!("expected Burn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn t_mr3_cli_02_burn_to_beneficiary_with_password_stdin() {
+        let cmd = parse(&[
+            "deadmkt-node", "burn",
+            "--to", "beneficiary",
+            "--amount", "5000",
+            "--password-stdin",
+        ]);
+        match cmd {
+            Command::Burn { to, amount, json, password_stdin } => {
+                assert_eq!(to, BurnTarget::Beneficiary);
+                assert_eq!(amount, 5000);
+                assert!(!json);
+                assert!(password_stdin);
+            }
+            other => panic!("expected Burn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn t_mr3_cli_03_withdraw_rushed_with_json() {
+        let cmd = parse(&["deadmkt-node", "withdraw", "rushed", "--json"]);
+        match cmd {
+            Command::Withdraw { action } => {
+                assert!(matches!(action, WithdrawAction::Rushed { .. }));
+                assert!(action.json());
+                assert!(!action.password_stdin());
+            }
+            other => panic!("expected Withdraw, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn t_mr3_cli_04_withdraw_subcommand_variants() {
+        // All six sub-actions parse with --json after the subcommand.
+        for arg in ["rushed", "request-rushed", "cancel-rushed",
+                    "claim-all", "start-holding", "cancel-holding"] {
+            let cmd = parse(&["deadmkt-node", "withdraw", arg, "--json"]);
+            match cmd {
+                Command::Withdraw { action } => {
+                    assert!(action.json(), "json missing for {}", arg);
+                }
+                other => panic!("expected Withdraw, got {:?} (arg={})", other, arg),
+            }
+        }
+    }
+
+    #[test]
+    fn t_mr3_cli_07_withdraw_password_stdin() {
+        let cmd = parse(&["deadmkt-node", "withdraw", "rushed", "--password-stdin"]);
+        match cmd {
+            Command::Withdraw { action } => {
+                assert!(!action.json());
+                assert!(action.password_stdin());
+            }
+            other => panic!("expected Withdraw, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn t_mr3_cli_05_agent_config_default() {
+        let cmd = parse(&["deadmkt-node", "agent-config", "--json"]);
+        match cmd {
+            Command::AgentConfig { rotate_token, json } => {
+                assert!(!rotate_token);
+                assert!(json);
+            }
+            other => panic!("expected AgentConfig, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn t_mr3_cli_06_agent_config_rotate() {
+        let cmd = parse(&["deadmkt-node", "agent-config", "--rotate-token"]);
+        match cmd {
+            Command::AgentConfig { rotate_token, json } => {
+                assert!(rotate_token);
+                assert!(!json);
+            }
+            other => panic!("expected AgentConfig, got {:?}", other),
+        }
     }
 }
