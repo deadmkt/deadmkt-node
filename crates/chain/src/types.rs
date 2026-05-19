@@ -293,10 +293,12 @@ pub enum ChainEvent {
     // B4 events — withdrawal lifecycle:
     WithdrawalRequested { nft_id: u64, token: String, amount: u64 },
     WithdrawalCancelled { nft_id: u64, token: String, amount: u64 },
-    WithdrawalExecuted { nft_id: u64, token: String, amount: u64 },
+    // C-NO-PT-WD (2026-05-19): WithdrawalExecuted + ClaimExecuted variants
+    // removed. The per-token wallet exit paths that emitted them are gone
+    // from the contract; SUPRA-only exits now flow through MktBurned with
+    // reason=2 (rushed) or reason=3 (claim_all).
     HoldingPeriodStarted { nft_id: u64, expires_at_batch: u64 },
     HoldingPeriodCancelled { nft_id: u64 },
-    ClaimExecuted { nft_id: u64 },
 
     // B4 events — enforcement + registration:
     NftBlocked { nft_id: u64, enforcement_at_batch: u64 },
@@ -379,15 +381,6 @@ impl ChainEvent {
                 amount: data.get("amount").and_then(|v| v.as_str())
                     .unwrap_or("0").parse().unwrap_or(0),
             })
-        } else if type_str.contains("WithdrawalExecuted") {
-            Ok(ChainEvent::WithdrawalExecuted {
-                nft_id: data.get("nft_id").and_then(|v| v.as_str())
-                    .unwrap_or("0").parse().unwrap_or(0),
-                token: data.get("token_metadata").and_then(|v| v.as_str())
-                    .unwrap_or("").to_string(),
-                amount: data.get("amount").and_then(|v| v.as_str())
-                    .unwrap_or("0").parse().unwrap_or(0),
-            })
         } else if type_str.contains("HoldingPeriodStarted") {
             Ok(ChainEvent::HoldingPeriodStarted {
                 nft_id: data.get("nft_id").and_then(|v| v.as_str())
@@ -400,12 +393,6 @@ impl ChainEvent {
                 nft_id: data.get("nft_id").and_then(|v| v.as_str())
                     .unwrap_or("0").parse().unwrap_or(0),
             })
-        } else if type_str.contains("ClaimExecuted") {
-            Ok(ChainEvent::ClaimExecuted {
-                nft_id: data.get("nft_id").and_then(|v| v.as_str())
-                    .unwrap_or("0").parse().unwrap_or(0),
-            })
-
         // ── B4: Enforcement + registration events ──────────────────
         } else if type_str.contains("NFTBlocked") || type_str.contains("NftBlocked") {
             Ok(ChainEvent::NftBlocked {
@@ -695,19 +682,8 @@ mod tests {
         }
     }
 
-    // T_EVENT_03: ClaimExecuted
-    #[test]
-    fn test_claim_executed_event() {
-        let json = json!({
-            "type": "0xDEADMKT::escrow::ClaimExecuted",
-            "data": { "nft_id": "42" }
-        });
-        let event = ChainEvent::from_json(&json).unwrap();
-        match event {
-            ChainEvent::ClaimExecuted { nft_id } => assert_eq!(nft_id, 42),
-            _ => panic!("wrong event type"),
-        }
-    }
+    // T_EVENT_03: ClaimExecuted -- deleted alongside the ChainEvent
+    // variant in C-NO-PT-WD (2026-05-19).
 
     // T_EVENT_04: NftBlocked (uses accused_nft_id field name from contract)
     #[test]
