@@ -17,6 +17,9 @@ thiserror = { workspace = true }
 hex = { workspace = true }
 sha3 = { workspace = true }
 rand = { workspace = true }
+# MR7: wizard UX polish (RealWizardIO only; SilentIO + MockWizardIO ignore).
+dialoguer = { workspace = true }
+indicatif = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
