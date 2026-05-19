@@ -41,6 +41,10 @@ bincode = "1.3"
 clap = { version = "4", features = ["derive"] }
 libp2p = { version = "0.53", features = ["gossipsub", "noise", "yamux", "tcp", "tokio", "macros"] }
 tracing = "0.1"
+# MR7: wizard UX polish -- interactive setup prompts + slow-op spinners.
+# `password` feature is required for no-echo keystore password prompt.
+dialoguer = { version = "0.11", default-features = false, features = ["password"] }
+indicatif = { version = "0.17", default-features = false }
 
 [package]
 name = "deadmkt-node"
@@ -80,6 +84,9 @@ sha3 = { workspace = true }
 hex = { workspace = true }
 bcs = { workspace = true }
 rand = { workspace = true }
+# MR7: StdIO (interactive WizardIO impl) in setup_bridge.rs uses these.
+dialoguer = { workspace = true }
+indicatif = { workspace = true }
 
 [features]
 integration = []

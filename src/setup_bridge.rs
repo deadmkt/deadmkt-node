@@ -4,7 +4,7 @@
 
 use deadmkt_chain::client::SupraClient;
 use deadmkt_setup::{
-    ChainClient, NftConfigInfo, SetupError, TxResultInfo, WalletBalance, WizardIO,
+    ChainClient, NftConfigInfo, SetupError, SpinnerHandle, TxResultInfo, WalletBalance, WizardIO,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
@@ -38,6 +38,116 @@ impl WizardIO for StdIO {
 
     fn is_aborted(&self) -> bool {
         false
+    }
+
+    // ---------------------------------------------------------------------
+    // MR7: dialoguer/indicatif-backed implementations. Auto-detect TTY
+    // for color; spinners degrade to a plain line on piped stdout.
+    // The default trait impls (print + read_line loops) handle the
+    // SilentIO / test-mock paths -- StdIO overrides only the methods
+    // where dialoguer gives a meaningfully better experience.
+    // ---------------------------------------------------------------------
+
+    fn print_info(&mut self, msg: &str) {
+        use dialoguer::console::style;
+        println!("{} {}", style("==>").cyan().bold(), msg);
+    }
+
+    fn print_success(&mut self, msg: &str) {
+        use dialoguer::console::style;
+        println!("{} {}", style("[ok]").green().bold(), msg);
+    }
+
+    fn print_warning(&mut self, msg: &str) {
+        use dialoguer::console::style;
+        eprintln!("{} {}", style("[warn]").yellow().bold(), msg);
+    }
+
+    fn prompt_input(
+        &mut self,
+        prompt: &str,
+        default: Option<&str>,
+        validate: Option<&dyn Fn(&str) -> Result<(), String>>,
+    ) -> Result<String, SetupError> {
+        use dialoguer::{theme::ColorfulTheme, Input};
+        let theme = ColorfulTheme::default();
+        let mut builder: Input<String> = Input::with_theme(&theme).with_prompt(prompt);
+        if let Some(d) = default {
+            builder = builder.default(d.to_string());
+        }
+        // dialoguer's validate_with takes a closure of its own. Bridge
+        // through a wrapper that returns the operator-friendly message.
+        let result = if let Some(f) = validate {
+            builder
+                .validate_with(|input: &String| -> Result<(), String> {
+                    f(input.as_str())
+                })
+                .interact_text()
+        } else {
+            builder.interact_text()
+        };
+        result.map_err(|e| SetupError::IoError(format!("input prompt: {}", e)))
+    }
+
+    fn prompt_password(
+        &mut self,
+        prompt: &str,
+        with_confirm: bool,
+    ) -> Result<String, SetupError> {
+        use dialoguer::{theme::ColorfulTheme, Password};
+        let theme = ColorfulTheme::default();
+        let mut builder = Password::with_theme(&theme).with_prompt(prompt);
+        if with_confirm {
+            builder = builder.with_confirmation(
+                format!("Confirm {}", prompt),
+                "passwords did not match",
+            );
+        }
+        builder
+            .interact()
+            .map_err(|e| SetupError::IoError(format!("password prompt: {}", e)))
+    }
+
+    fn prompt_select(
+        &mut self,
+        prompt: &str,
+        items: &[&str],
+        default_idx: usize,
+    ) -> Result<usize, SetupError> {
+        use dialoguer::{theme::ColorfulTheme, Select};
+        let theme = ColorfulTheme::default();
+        Select::with_theme(&theme)
+            .with_prompt(prompt)
+            .items(items)
+            .default(default_idx)
+            .interact()
+            .map_err(|e| SetupError::IoError(format!("select prompt: {}", e)))
+    }
+
+    fn prompt_confirm(
+        &mut self,
+        prompt: &str,
+        default_yes: bool,
+    ) -> Result<bool, SetupError> {
+        use dialoguer::{theme::ColorfulTheme, Confirm};
+        let theme = ColorfulTheme::default();
+        Confirm::with_theme(&theme)
+            .with_prompt(prompt)
+            .default(default_yes)
+            .interact()
+            .map_err(|e| SetupError::IoError(format!("confirm prompt: {}", e)))
+    }
+
+    fn spinner(&mut self, label: &str) -> SpinnerHandle {
+        use indicatif::{ProgressBar, ProgressStyle};
+        let bar = ProgressBar::new_spinner();
+        bar.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        bar.set_message(label.to_string());
+        bar.enable_steady_tick(std::time::Duration::from_millis(120));
+        SpinnerHandle::real(bar)
     }
 }
 
