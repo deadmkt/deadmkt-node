@@ -2,26 +2,42 @@
 
 Trading node for the DeadMKT decentralized batch-auction protocol on Supra.
 
-## Quick Start
+## One-Liner Install (recommended)
+
+On a fresh Linux VPS (Ubuntu/Debian/Fedora/RHEL/Rocky/AlmaLinux) with sudo:
+
+```bash
+curl -sSL https://get.deadmkt.com | bash
+```
+
+The installer checks prerequisites, installs Docker + git if missing, clones this repo, builds the image, runs the non-interactive setup wizard (asks for your beneficiary address + a keystore password), starts the node with `--restart=unless-stopped`, and prints the status JSON. About 5-8 minutes on a small VPS, mostly `docker build` time.
+
+Idempotent: re-running skips prompts when a keystore already exists; passes `--rebuild` to force a fresh image build.
+
+The installer is just bash -- read it before piping into your shell: [`install.sh`](install.sh).
+
+## Manual install
 
 ```bash
 git clone https://github.com/deadmkt/deadmkt-node.git
 cd deadmkt-node
 docker build -t deadmkt-node .
-docker run -it -v deadmkt-data:/data deadmkt-node deadmkt-node setup
+docker run -it -v ~/.deadmkt:/data deadmkt-node deadmkt-node setup
 ```
 
-The setup wizard guides you through keypair generation, funding, token minting, and escrow registration.
-
-After setup:
+The setup wizard guides you through keypair generation, funding, token minting, and escrow registration. After setup:
 
 ```bash
 docker run -d --name deadmkt-node \
-  -v deadmkt-data:/data \
-  -e DEADMKT_KEYSTORE_PASSWORD='your_password' \
+  -v ~/.deadmkt:/data \
+  -p 127.0.0.1:9090:9090 \
+  -p 127.0.0.1:9292:9292 \
+  -p 9191:9191 \
   --restart unless-stopped \
   deadmkt-node
 ```
+
+Non-interactive setup (for scripting / LLM-assisted operators): see `examples/setup-config*.json` and run `deadmkt-node --config /data/setup.json`.
 
 ## Build from Source
 
