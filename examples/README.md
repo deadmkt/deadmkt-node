@@ -1,5 +1,15 @@
 # deadmkt-node examples
 
+## One-liner install (MR4)
+
+For most operators, the easiest entry point is the installer at the repo root:
+
+```bash
+curl -sSL https://get.deadmkt.com | bash
+```
+
+It runs the same non-interactive setup these examples describe, then starts the node. Use the configs below only if you need to drive setup manually (e.g. from a CI pipeline, custom orchestrator, or LLM-assisted flow).
+
 ## Non-interactive setup configs (MR1)
 
 Three flavours of `setup.json`, consumed via:
