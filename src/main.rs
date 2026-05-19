@@ -982,10 +982,14 @@ async fn fetch_status_v1_from_endpoint() -> Result<String, String> {
 }
 
 /// MR1b: prompt the operator for the keystore password on stderr,
-/// read one line from stdin. Echoes characters as the operator types
-/// (we don't pull in `rpassword` for this slice -- the existing
-/// interactive wizard's wizard_generate_keypair also echoes). Future
-/// MR1d / hardening can swap to a no-echo input.
+/// read one line from stdin. Used by the MR1b LLM-assisted setup
+/// flow + MR1c restore flow + MR3 action commands (without
+/// `--password-stdin`). Echoes characters -- deliberately, because
+/// these paths run from `main.rs` not the wizard's `WizardIO` and
+/// don't have a `dialoguer::Password` handle. Operators driving
+/// scripts pass `--password-stdin` to skip the prompt; interactive
+/// wizard runs (`deadmkt-node setup`) get no-echo via MR7's
+/// `StdIO::prompt_password` instead.
 fn prompt_keystore_password() -> Result<String, String> {
     use std::io::{BufRead, Write};
     eprint!("Keystore password: ");

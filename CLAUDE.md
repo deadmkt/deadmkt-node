@@ -2,6 +2,16 @@
 
 Rust trading node for the deadmkt decentralized batch-auction protocol on Supra Testnet.
 
+## Operator-facing surface (post-MR1..MR7)
+
+Three entry points, in order of how an operator typically encounters them:
+
+- **One-liner installer:** `curl -sSL https://get.deadmkt.com | bash` runs `install.sh` (source build, `--restart=unless-stopped`, idempotent). Backs the v1 SetupResult JSON for failure cases.
+- **CLI:** `deadmkt-node {setup,status,escrow,reactivate,deposit,burn,withdraw,agent-config,apply-params,update-params}`. The action commands (`burn`, `withdraw <sub>`, `agent-config`) support `--json` to emit a v1 action-result envelope and `--password-stdin` for scripting (MR3). `status --json` emits the v1 status payload via the SP8 endpoint at `127.0.0.1:9292` with a `node_running:false` fallback (MR2).
+- **Operator playbook:** `deadmkt.com/playbook` (MR5) is the AI-paste page; operators feed it to any chat AI for guided setup / monitoring / withdrawal.
+
+The interactive `deadmkt-node setup` wizard uses dialoguer + indicatif (no-echo password, validated inputs, spinners on slow ops) since MR7. The non-interactive `--config setup.json` path (MR1a/b/c) drives the same orchestrator with a `SilentIO` adapter and emits the v1 SetupResult JSON.
+
 ## Build & Test
 
 ```bash
@@ -27,14 +37,21 @@ cargo test
 
 ## Key Files
 
-- `src/run.rs` -- main event loop, phase handlers, all subsystem wiring (~2300 lines)
-- `src/token_worker.rs` -- background Mint/Burn/Lock/Unlock handler
-- `crates/strategy/src/lib.rs` -- event/action types, BatchStartData struct, JSON serialization
-- `crates/strategy/src/server.rs` -- WebSocket server for strategy connections
-- `crates/settlement/src/lib.rs` -- SettlementSubmitter (4A) + SettlementManager (4B)
-- `crates/gossip/src/network.rs` -- libp2p gossipsub node
-- `crates/matching/src/lib.rs` -- deterministic price-time priority matching engine
-- `crates/escrow_tracker/src/lib.rs` -- in-memory balance tracking (projected vs confirmed)
+- `install.sh` -- MR4a one-liner installer (source build path).
+- `src/main.rs` -- CLI entrypoints (status / withdraw / burn / agent-config handlers; `mr3_load_signed_chain` shared bring-up; ActionResultBuilder envelope; non-interactive setup / restore routers).
+- `src/cli.rs` -- clap `Command` enum + WithdrawAction / BurnTarget subcommands.
+- `src/run.rs` -- main event loop, phase handlers, all subsystem wiring (~3500 lines). MR2 v1 status atomics + `build_status_v1_json`/`build_status_v1_disk_only_json` live here.
+- `src/setup_bridge.rs` -- `StdIO` (interactive `WizardIO` impl using dialoguer + indicatif) + `SupraSetupClient` (concrete `ChainClient`).
+- `src/token_worker.rs` -- background Mint/Burn/Lock/Unlock handler.
+- `crates/setup/src/lib.rs` -- `WizardIO` trait (typed prompts + `SpinnerHandle`), `ChainClient` trait, wizard orchestrator, `SetupConfig`/`SetupResult` schemas.
+- `crates/setup/src/noninteractive.rs` -- MR1a/b/c non-interactive entrypoints + `SilentIO`.
+- `crates/strategy/src/lib.rs` -- event/action types, BatchStartData struct, JSON serialization.
+- `crates/strategy/src/server.rs` -- WebSocket server for strategy connections.
+- `crates/settlement/src/lib.rs` -- SettlementSubmitter (4A) + SettlementManager (4B).
+- `crates/gossip/src/network.rs` -- libp2p gossipsub node.
+- `crates/matching/src/lib.rs` -- deterministic price-time priority matching engine.
+- `crates/escrow_tracker/src/lib.rs` -- in-memory balance tracking (projected vs confirmed).
+- `examples/` -- setup-config*.json (MR1), status-output.json (MR2), action-result-output.json (MR3).
 
 ## Contract
 
