@@ -157,6 +157,10 @@ pub struct OpsTreasuryConfig {
     pub decay_period_secs: u64,
     pub automation_owner_address: String,
     pub low_balance_threshold: u64,
+    /// rev5: max refund as basis points of mint_fee (9500 = 95.00%).
+    /// Caps the decay curve so day-0 mint-and-burn loses (10000 - bps)/10000
+    /// of mint_fee. Default 9500.
+    pub max_refund_bps: u64,
     pub admin: String,
     pub admin_burned: bool,
 }

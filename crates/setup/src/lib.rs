@@ -749,12 +749,16 @@ pub async fn mint_nft_pair(
     trustee_address: &str,
 ) -> Result<u64, SetupError> {
     let mint_fee_supra = chain.get_mint_fee().await? / 100_000_000; // 8 decimals
+    // rev5: max refund caps at 95% of mint_fee at day 0; decays from there.
+    let max_refund_supra = mint_fee_supra * 95 / 100;
     io.print("\nMembership deposit:\n");
     io.print(&format!(
-        "  {} SUPRA (refundable on burn-exit, less linear time-decay\n",
-        format_with_commas(mint_fee_supra)
+        "  {} SUPRA (refundable on burn-exit up to {} SUPRA at day 0,\n",
+        format_with_commas(mint_fee_supra),
+        format_with_commas(max_refund_supra),
     ));
-    io.print("  at 50 SUPRA per 30 days; floor at 0 after ~20 months)\n");
+    io.print("  then decaying 50 SUPRA per 30 days; floor at 0 after ~19 months.\n");
+    io.print("  A day-0 mint-and-burn costs at least 5% of the deposit.)\n");
     io.print("\nSponsor address (receives the burn-exit refund):\n");
     io.print(&format!("  {}\n", sponsor));
     if sponsor == trustee_address {
