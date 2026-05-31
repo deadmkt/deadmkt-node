@@ -265,6 +265,32 @@ pub struct SupraSetupClient {
 }
 
 impl SupraSetupClient {
+    /// Burn-exit (DMKT13): read-only preview of what exits::execute_burn_pair
+    /// would pay for `nft_id` right now. Returns raw u64 SUPRA (8 decimals).
+    /// Reflects bootstrap lockout, last-NFT carve-out, time-decay, pro-rata cap.
+    pub async fn preview_burn_refund(&self, nft_id: u64) -> Result<u64, SetupError> {
+        match self.client
+            .view_raw(
+                "exits",
+                "preview_burn_refund",
+                vec![],
+                vec![Value::String(nft_id.to_string())],
+            )
+            .await
+        {
+            Ok(val) => {
+                let raw = val.as_array()
+                    .and_then(|arr| arr.first())
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| SetupError::ChainError(
+                        "preview_burn_refund: unexpected view result shape".into(),
+                    ))?;
+                raw.parse::<u64>().map_err(|e| SetupError::ChainError(e.to_string()))
+            }
+            Err(e) => Err(SetupError::ChainError(e.to_string())),
+        }
+    }
+
     pub fn new(rpc_urls: Vec<String>, contract_addr: String) -> Self {
         let parsed = parse_address(&contract_addr).unwrap_or([0u8; 32]);
         // #12: env overrides apply at wizard time too (before config.json exists).

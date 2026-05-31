@@ -14,7 +14,7 @@ mod setup_bridge;
 mod token_worker;
 
 use clap::Parser;
-use cli::{BurnTarget, Cli, Command, WithdrawAction};
+use cli::{BurnPairAction, BurnTarget, Cli, Command, WithdrawAction};
 use deadmkt_config::{default_contract_addresses, is_first_boot, Network, NodeConfig};
 use deadmkt_keystore::{detect_keystore_mode, KeystoreMode};
 use deadmkt_setup::ChainClient;
@@ -736,6 +736,120 @@ async fn main() {
         }
         Command::AgentConfig { rotate_token, json } => {
             run_mr3_agent_config_and_exit(rotate_token, json).await;
+        }
+        Command::BurnPair { action } => {
+            let json = action.json();
+            let password_stdin = action.password_stdin();
+            run_burn_pair_and_exit(action, json, password_stdin).await;
+        }
+    }
+}
+
+// =========================================================================
+// Burn-exit (DMKT13): burn-pair {request, execute, preview}
+//
+// `request` signs from the BENEFICIARY keystore (which the node typically
+// doesn't have on disk -- emits a clear error pointing operators at the
+// beneficiary wallet to submit `exits::request_burn_pair` directly).
+// `execute` signs from the trustee keystore -- this is the normal node path.
+// `preview` is read-only via the exits::preview_burn_refund view.
+// =========================================================================
+async fn run_burn_pair_and_exit(action: BurnPairAction, json: bool, password_stdin: bool) -> ! {
+    let _ = password_stdin;  // execute path will use this once wired
+    let dir = data_dir();
+    let config_path = dir.join("config.json");
+
+    let config = match NodeConfig::load(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            let builder = ActionResultBuilder::new(
+                "burn-pair",
+                serde_json::json!({}),
+            );
+            let out = builder.failure("load_config", e.to_string());
+            if json { println!("{}", out); } else { eprintln!("burn-pair: config load failed: {}", e); }
+            std::process::exit(1);
+        }
+    };
+
+    match action {
+        BurnPairAction::Preview { .. } => {
+            let chain_for_view = setup_bridge::SupraSetupClient::new(
+                config.rpc_urls.clone(),
+                config.contracts.settlement.clone(),
+            );
+            match chain_for_view.preview_burn_refund(config.nft_id).await {
+                Ok(refund_raw) => {
+                    let fields = serde_json::json!({
+                        "nft_id": config.nft_id,
+                        "preview_refund_raw": refund_raw,
+                        "preview_refund_supra": (refund_raw as f64) / 100_000_000.0,
+                    });
+                    let out = ActionResultBuilder::new("burn-pair-preview", fields)
+                        .success_read_only();
+                    if json {
+                        println!("{}", out);
+                    } else {
+                        println!(
+                            "Preview refund for NFT #{}: {} SUPRA ({} raw)",
+                            config.nft_id,
+                            (refund_raw as f64) / 100_000_000.0,
+                            refund_raw,
+                        );
+                    }
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    let out = ActionResultBuilder::new("burn-pair-preview", serde_json::json!({
+                        "nft_id": config.nft_id,
+                    })).failure("preview_view_call", e.to_string());
+                    if json { println!("{}", out); }
+                    else { eprintln!("burn-pair preview failed: {}", e); }
+                    std::process::exit(1);
+                }
+            }
+        }
+        BurnPairAction::Request { .. } => {
+            // request_burn_pair is signed by the BENEFICIARY, not the trustee.
+            // The node only holds the trustee keystore.
+            let out = ActionResultBuilder::new("burn-pair-request", serde_json::json!({
+                "nft_id": config.nft_id,
+            })).failure(
+                "not_supported_via_node_cli",
+                "request_burn_pair must be signed by the beneficiary wallet, not \
+                 the trustee. Submit exits::request_burn_pair(nft_id) directly \
+                 from your beneficiary wallet (Supra CLI / StarKey / etc).",
+            );
+            if json { println!("{}", out); }
+            else {
+                eprintln!(
+                    "burn-pair request: signed by beneficiary, not trustee. \
+                     Submit exits::request_burn_pair from your beneficiary wallet."
+                );
+            }
+            std::process::exit(2);
+        }
+        BurnPairAction::Execute { .. } => {
+            // Trustee path: signs exits::execute_burn_pair(caller, nft_id).
+            // Requires ChainClient::submit_execute_burn_pair which isn't yet
+            // wired -- pending the same follow-up as submit_burn_pair on
+            // the chain client trait.
+            let out = ActionResultBuilder::new("burn-pair-execute", serde_json::json!({
+                "nft_id": config.nft_id,
+            })).failure(
+                "execute_path_pending",
+                "burn-pair execute requires ChainClient::submit_execute_burn_pair (pending wire-up)",
+            );
+            if json { println!("{}", out); }
+            else {
+                eprintln!(
+                    "burn-pair execute: chain client wire-up pending. \
+                     Use the Supra CLI directly for now: \
+                     `supra move tool run --function-id $CONTRACT::exits::execute_burn_pair --args u64:{}`",
+                    config.nft_id,
+                );
+            }
+            std::process::exit(1);
         }
     }
 }
