@@ -121,26 +121,44 @@ impl BatchEpoch {
 }
 
 // =========================================================================
-// NftConfig
+// NftConfig (burn-exit rev: bond fields removed; burn_cooldown_seconds + admin)
+// Contract view: nft::get_nft_config() -> (u64, address)
 // =========================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NftConfig {
-    pub bond_amount: u64,
-    pub bond_lock_seconds: u64,
-    pub cooldown_seconds: u64,
+    pub burn_cooldown_seconds: u64,
     pub admin: String,
 }
 
 impl NftConfig {
     pub fn from_view_result(json: &serde_json::Value) -> Result<Self, TypesError> {
         Ok(NftConfig {
-            bond_amount: parse_u64(get_element(json, 0)?, 0)?,
-            bond_lock_seconds: parse_u64(get_element(json, 1)?, 1)?,
-            cooldown_seconds: parse_u64(get_element(json, 2)?, 2)?,
-            admin: parse_str(get_element(json, 3)?, 3)?,
+            burn_cooldown_seconds: parse_u64(get_element(json, 0)?, 0)?,
+            admin: parse_str(get_element(json, 1)?, 1)?,
         })
     }
+}
+
+// =========================================================================
+// OpsTreasuryConfig (AOE5 calibration constants + automation owner + admin)
+// Contract view: ops_treasury::get_*() accessors (7 typed view fns total)
+// This struct is constructed by calling each view fn -- there's no single
+// "get_treasury_config" view that returns the whole tuple. The struct is
+// the node-side aggregate used by the wizard + status JSON.
+// =========================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpsTreasuryConfig {
+    pub mint_fee: u64,
+    pub dvrf_top_up_amount: u64,
+    pub donation_cap: u64,
+    pub decay_per_period: u64,
+    pub decay_period_secs: u64,
+    pub automation_owner_address: String,
+    pub low_balance_threshold: u64,
+    pub admin: String,
+    pub admin_burned: bool,
 }
 
 // =========================================================================
@@ -198,25 +216,11 @@ impl PoolState {
 }
 
 // =========================================================================
-// MintBond
+// MintBond removed (burn-exit rev): the refundable bond is gone from the
+// contract; the mint_fee flows into ops_treasury as a one-way deposit and
+// is recovered (with time decay) via exits::execute_burn_pair.
+// See planning/specs/individual-nft-burn-exit.md.
 // =========================================================================
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MintBond {
-    pub nft_id: u64,
-    pub amount: u64,
-    pub unlock_at: u64,
-}
-
-impl MintBond {
-    pub fn from_view_result(json: &serde_json::Value) -> Result<Self, TypesError> {
-        Ok(MintBond {
-            nft_id: parse_u64(get_element(json, 0)?, 0)?,
-            amount: parse_u64(get_element(json, 1)?, 1)?,
-            unlock_at: parse_u64(get_element(json, 2)?, 2)?,
-        })
-    }
-}
 
 // =========================================================================
 // Token decimals
@@ -287,8 +291,53 @@ pub enum ChainEvent {
     MarketPairAdded { symbol: Vec<u8> },
     PauseQueued { after_batch: u64 },
     Unpaused,
-    NftPairMinted { nft_id: u64 },
-    MintBondReclaimed { nft_id: u64 },
+
+    // NFT lifecycle (burn-exit rev):
+    // NftPairMinted gains sponsor + cohort_started fields; loses bond_amount/unlock_at.
+    // NFTPairBurned removed (burn_pair deleted from contract).
+    // MintBondReclaimed removed (bond deleted from contract).
+    NftPairMinted {
+        nft_id: u64,
+        sponsor: String,
+        mint_fee_paid: u64,
+        cohort_started: bool,
+    },
+
+    // Burn-exit events (from exits.move):
+    BurnRequested {
+        nft_id: u64,
+        beneficiary: String,
+        requested_at_batch: u64,
+    },
+    BurnExecuted {
+        nft_id: u64,
+        executor: String,
+        sponsor: String,
+        beneficiary: String,
+        refund_supra: u64,
+        treasury_before: u64,
+        treasury_after: u64,
+        active_nfts_before_burn: u64,
+        supra_to_beneficiary: u64,
+        is_fallback: bool,
+        is_last_nft: bool,
+        nominal_refund: u64,
+    },
+
+    // ops_treasury events (AOE1/2/3/9):
+    DonationReceived { donor: String, amount: u64, treasury_after: u64 },
+    DonationRejected { donor: String, amount_attempted: u64, treasury_balance: u64 },
+    DvrfFunded { amount: u64, treasury_after: u64, dvrf_balance_after: u64 },
+    AutomationOwnerTopped {
+        amount: u64,
+        owner: String,
+        treasury_after: u64,
+        owner_balance_after: u64,
+    },
+    TreasuryLowBalance { current_balance: u64, threshold: u64, days_of_runway: u64 },
+    TreasuryRecovered { current_balance: u64, threshold: u64 },
+    OpsTreasuryConfigUpdated,
+    AdminKeyBurned { previous_admin: String },
 
     // B4 events — withdrawal lifecycle:
     WithdrawalRequested { nft_id: u64, token: String, amount: u64 },
@@ -296,7 +345,7 @@ pub enum ChainEvent {
     // C-NO-PT-WD (2026-05-19): WithdrawalExecuted + ClaimExecuted variants
     // removed. The per-token wallet exit paths that emitted them are gone
     // from the contract; SUPRA-only exits now flow through MktBurned with
-    // reason=2 (rushed) or reason=3 (claim_all).
+    // reason=2 (rushed) or reason=3 (claim_all) or reason=4 (burn_exit).
     HoldingPeriodStarted { nft_id: u64, expires_at_batch: u64 },
     HoldingPeriodCancelled { nft_id: u64 },
 
@@ -454,6 +503,119 @@ impl ChainEvent {
         } else if type_str.contains("PoolAdjustmentCancelled") {
             Ok(ChainEvent::PoolAdjustmentCancelled)
 
+        // ── NFT lifecycle (burn-exit rev) ──────────────────────────
+        } else if type_str.contains("NFTPairMinted") {
+            Ok(ChainEvent::NftPairMinted {
+                nft_id: data.get("nft_id").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                sponsor: data.get("sponsor").and_then(|v| v.as_str())
+                    .unwrap_or("").to_string(),
+                mint_fee_paid: data.get("mint_fee_paid").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                cohort_started: data.get("cohort_started")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            })
+
+        // ── Burn-exit events (from exits.move) ─────────────────────
+        } else if type_str.contains("BurnRequested") {
+            Ok(ChainEvent::BurnRequested {
+                nft_id: data.get("nft_id").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                beneficiary: data.get("beneficiary").and_then(|v| v.as_str())
+                    .unwrap_or("").to_string(),
+                requested_at_batch: data.get("requested_at_batch").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+            })
+        } else if type_str.contains("BurnExecuted") {
+            Ok(ChainEvent::BurnExecuted {
+                nft_id: data.get("nft_id").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                executor: data.get("executor").and_then(|v| v.as_str())
+                    .unwrap_or("").to_string(),
+                sponsor: data.get("sponsor").and_then(|v| v.as_str())
+                    .unwrap_or("").to_string(),
+                beneficiary: data.get("beneficiary").and_then(|v| v.as_str())
+                    .unwrap_or("").to_string(),
+                refund_supra: data.get("refund_supra").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                treasury_before: data.get("treasury_before").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                treasury_after: data.get("treasury_after").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                active_nfts_before_burn: data.get("active_nfts_before_burn").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                supra_to_beneficiary: data.get("supra_to_beneficiary").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                is_fallback: data.get("is_fallback").and_then(|v| v.as_bool()).unwrap_or(false),
+                is_last_nft: data.get("is_last_nft").and_then(|v| v.as_bool()).unwrap_or(false),
+                nominal_refund: data.get("nominal_refund").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+            })
+
+        // ── ops_treasury events (AOE1/2/3/9) ───────────────────────
+        } else if type_str.contains("DonationReceived") {
+            Ok(ChainEvent::DonationReceived {
+                donor: data.get("donor").and_then(|v| v.as_str())
+                    .unwrap_or("").to_string(),
+                amount: data.get("amount").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                treasury_after: data.get("treasury_after").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+            })
+        } else if type_str.contains("DonationRejected") {
+            Ok(ChainEvent::DonationRejected {
+                donor: data.get("donor").and_then(|v| v.as_str())
+                    .unwrap_or("").to_string(),
+                amount_attempted: data.get("amount_attempted").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                treasury_balance: data.get("treasury_balance").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+            })
+        } else if type_str.contains("DvrfFunded") {
+            Ok(ChainEvent::DvrfFunded {
+                amount: data.get("amount").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                treasury_after: data.get("treasury_after").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                dvrf_balance_after: data.get("dvrf_balance_after").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+            })
+        } else if type_str.contains("AutomationOwnerTopped") {
+            Ok(ChainEvent::AutomationOwnerTopped {
+                amount: data.get("amount").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                owner: data.get("owner").and_then(|v| v.as_str())
+                    .unwrap_or("").to_string(),
+                treasury_after: data.get("treasury_after").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                owner_balance_after: data.get("owner_balance_after").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+            })
+        } else if type_str.contains("TreasuryLowBalance") {
+            Ok(ChainEvent::TreasuryLowBalance {
+                current_balance: data.get("current_balance").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                threshold: data.get("threshold").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                days_of_runway: data.get("days_of_runway").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+            })
+        } else if type_str.contains("TreasuryRecovered") {
+            Ok(ChainEvent::TreasuryRecovered {
+                current_balance: data.get("current_balance").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+                threshold: data.get("threshold").and_then(|v| v.as_str())
+                    .unwrap_or("0").parse().unwrap_or(0),
+            })
+        } else if type_str.contains("OpsTreasuryConfigUpdated") {
+            Ok(ChainEvent::OpsTreasuryConfigUpdated)
+        } else if type_str.contains("AdminKeyBurned") {
+            Ok(ChainEvent::AdminKeyBurned {
+                previous_admin: data.get("previous_admin").and_then(|v| v.as_str())
+                    .unwrap_or("").to_string(),
+            })
+
         } else {
             Ok(ChainEvent::Unknown(type_str.to_string()))
         }
@@ -513,14 +675,12 @@ mod tests {
         assert_eq!(epoch.anchor_batch_id, 50);
     }
 
-    // T_TYPES_03
+    // T_TYPES_03 (burn-exit rev: NftConfig is now 2-tuple)
     #[test]
     fn test_nft_config_from_json() {
-        let json = json!(["1000000000000", "2592000", "3600", "0xADMIN"]);
+        let json = json!(["3600", "0xADMIN"]);
         let config = NftConfig::from_view_result(&json).unwrap();
-        assert_eq!(config.bond_amount, 1_000_000_000_000);
-        assert_eq!(config.bond_lock_seconds, 2_592_000);
-        assert_eq!(config.cooldown_seconds, 3600);
+        assert_eq!(config.burn_cooldown_seconds, 3600);
         assert_eq!(config.admin, "0xADMIN");
     }
 
@@ -570,14 +730,193 @@ mod tests {
         assert_eq!(map.to_human("KAY", 33_000_000u64), 330.0);
     }
 
-    // T_TYPES_07
+    // T_TYPES_07 deleted: MintBond struct removed in burn-exit revision
+    // (bond mechanism replaced by mint_fee -> ops_treasury -> time-decay
+    // refund on burn-exit). See planning/specs/individual-nft-burn-exit.md.
+
+    // T_TYPES_07b (new): NFTPairMinted event roundtrip with sponsor fields.
     #[test]
-    fn test_mint_bond_from_json() {
-        let json = json!(["42", "1000000000000", "1708300000"]);
-        let bond = MintBond::from_view_result(&json).unwrap();
-        assert_eq!(bond.nft_id, 42);
-        assert_eq!(bond.amount, 1_000_000_000_000);
-        assert_eq!(bond.unlock_at, 1_708_300_000);
+    fn test_nft_pair_minted_from_json() {
+        let json = json!({
+            "type": "0xDEADMKT::nft::NFTPairMinted",
+            "data": {
+                "nft_id": "42",
+                "trustee": "0xT",
+                "beneficiary": "0xB",
+                "sponsor": "0xS",
+                "ed25519_pubkey": "0xABCD",
+                "mint_fee_paid": "100000000000",
+                "timestamp": "1000",
+                "cohort_started": true
+            }
+        });
+        let ev = ChainEvent::from_json(&json).unwrap();
+        match ev {
+            ChainEvent::NftPairMinted { nft_id, sponsor, mint_fee_paid, cohort_started } => {
+                assert_eq!(nft_id, 42);
+                assert_eq!(sponsor, "0xS");
+                assert_eq!(mint_fee_paid, 100_000_000_000);
+                assert!(cohort_started);
+            }
+            other => panic!("expected NftPairMinted, got {:?}", other),
+        }
+    }
+
+    // T_TYPES_07c: BurnRequested event roundtrip.
+    #[test]
+    fn test_burn_requested_from_json() {
+        let json = json!({
+            "type": "0xDEADMKT::exits::BurnRequested",
+            "data": {
+                "nft_id": "5",
+                "beneficiary": "0xB",
+                "requested_at_batch": "999",
+                "timestamp": "2000"
+            }
+        });
+        let ev = ChainEvent::from_json(&json).unwrap();
+        match ev {
+            ChainEvent::BurnRequested { nft_id, beneficiary, requested_at_batch } => {
+                assert_eq!(nft_id, 5);
+                assert_eq!(beneficiary, "0xB");
+                assert_eq!(requested_at_batch, 999);
+            }
+            other => panic!("expected BurnRequested, got {:?}", other),
+        }
+    }
+
+    // T_TYPES_07d: BurnExecuted event roundtrip with all 12 fields.
+    #[test]
+    fn test_burn_executed_from_json() {
+        let json = json!({
+            "type": "0xDEADMKT::exits::BurnExecuted",
+            "data": {
+                "nft_id": "5",
+                "executor": "0xE",
+                "sponsor": "0xS",
+                "beneficiary": "0xB",
+                "refund_supra": "97500000000",
+                "treasury_before": "500000000000",
+                "treasury_after": "402500000000",
+                "active_nfts_before_burn": "5",
+                "supra_to_beneficiary": "0",
+                "is_fallback": false,
+                "is_last_nft": false,
+                "nominal_refund": "97500000000",
+                "timestamp": "3000"
+            }
+        });
+        let ev = ChainEvent::from_json(&json).unwrap();
+        match ev {
+            ChainEvent::BurnExecuted {
+                nft_id, refund_supra, is_last_nft, nominal_refund, active_nfts_before_burn, ..
+            } => {
+                assert_eq!(nft_id, 5);
+                assert_eq!(refund_supra, 97_500_000_000);
+                assert_eq!(nominal_refund, 97_500_000_000);
+                assert_eq!(active_nfts_before_burn, 5);
+                assert!(!is_last_nft);
+            }
+            other => panic!("expected BurnExecuted, got {:?}", other),
+        }
+    }
+
+    // T_TYPES_07e: TreasuryLowBalance event roundtrip.
+    #[test]
+    fn test_treasury_low_balance_from_json() {
+        let json = json!({
+            "type": "0xDEADMKT::ops_treasury::TreasuryLowBalance",
+            "data": {
+                "current_balance": "1500000000000",
+                "threshold": "1728000000000",
+                "days_of_runway": "52"
+            }
+        });
+        let ev = ChainEvent::from_json(&json).unwrap();
+        match ev {
+            ChainEvent::TreasuryLowBalance { current_balance, threshold, days_of_runway } => {
+                assert_eq!(current_balance, 1_500_000_000_000);
+                assert_eq!(threshold, 1_728_000_000_000);
+                assert_eq!(days_of_runway, 52);
+            }
+            other => panic!("expected TreasuryLowBalance, got {:?}", other),
+        }
+    }
+
+    // T_TYPES_07f: DonationReceived + DonationRejected roundtrip.
+    #[test]
+    fn test_donation_events_from_json() {
+        let received = json!({
+            "type": "0xDEADMKT::ops_treasury::DonationReceived",
+            "data": {
+                "donor": "0xD",
+                "amount": "1000000000000",
+                "treasury_after": "5000000000000"
+            }
+        });
+        let ev = ChainEvent::from_json(&received).unwrap();
+        match ev {
+            ChainEvent::DonationReceived { amount, treasury_after, .. } => {
+                assert_eq!(amount, 1_000_000_000_000);
+                assert_eq!(treasury_after, 5_000_000_000_000);
+            }
+            other => panic!("expected DonationReceived, got {:?}", other),
+        }
+
+        let rejected = json!({
+            "type": "0xDEADMKT::ops_treasury::DonationRejected",
+            "data": {
+                "donor": "0xD",
+                "amount_attempted": "1000000000000",
+                "treasury_balance": "60000000000000"
+            }
+        });
+        let ev = ChainEvent::from_json(&rejected).unwrap();
+        match ev {
+            ChainEvent::DonationRejected { amount_attempted, treasury_balance, .. } => {
+                assert_eq!(amount_attempted, 1_000_000_000_000);
+                assert_eq!(treasury_balance, 60_000_000_000_000);
+            }
+            other => panic!("expected DonationRejected, got {:?}", other),
+        }
+    }
+
+    // T_TYPES_07g: AutomationOwnerTopped + DvrfFunded roundtrip.
+    #[test]
+    fn test_top_up_events_from_json() {
+        let auto_topped = json!({
+            "type": "0xDEADMKT::ops_treasury::AutomationOwnerTopped",
+            "data": {
+                "amount": "1000000000000",
+                "owner": "0xOwner",
+                "treasury_after": "4000000000000",
+                "owner_balance_after": "2000000000000"
+            }
+        });
+        let ev = ChainEvent::from_json(&auto_topped).unwrap();
+        match ev {
+            ChainEvent::AutomationOwnerTopped { amount, owner, .. } => {
+                assert_eq!(amount, 1_000_000_000_000);
+                assert_eq!(owner, "0xOwner");
+            }
+            other => panic!("expected AutomationOwnerTopped, got {:?}", other),
+        }
+
+        let dvrf = json!({
+            "type": "0xDEADMKT::ops_treasury::DvrfFunded",
+            "data": {
+                "amount": "100000000000",
+                "treasury_after": "4900000000000",
+                "dvrf_balance_after": "5100000000000"
+            }
+        });
+        let ev = ChainEvent::from_json(&dvrf).unwrap();
+        match ev {
+            ChainEvent::DvrfFunded { amount, .. } => {
+                assert_eq!(amount, 100_000_000_000);
+            }
+            other => panic!("expected DvrfFunded, got {:?}", other),
+        }
     }
 
     // T_TYPES_08

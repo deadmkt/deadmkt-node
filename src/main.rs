@@ -778,7 +778,7 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
             };
             let r = SetupResult {
                 success: false, mode: mode_for_failure,
-                nft_id: None, trustee_address: None, beneficiary_address: None,
+                nft_id: None, trustee_address: None, beneficiary_address: None, sponsor_address: None,
                 network: String::new(), node_role: String::new(),
                 escrow_balances: None, gas_balance_supra: None,
                 steps_performed: Vec::new(), steps_skipped: Vec::new(),
@@ -803,7 +803,7 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
             };
             let r = SetupResult {
                 success: false, mode: mode_for_failure,
-                nft_id: None, trustee_address: None, beneficiary_address: None,
+                nft_id: None, trustee_address: None, beneficiary_address: None, sponsor_address: None,
                 network: String::new(), node_role: String::new(),
                 escrow_balances: None, gas_balance_supra: None,
                 steps_performed: Vec::new(), steps_skipped: Vec::new(),
@@ -839,7 +839,7 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
         if cfg.keystore_password.is_some() {
             let r = SetupResult {
                 success: false, mode: SetupMode::ConfigWithKeystore,
-                nft_id: None, trustee_address: None, beneficiary_address: None,
+                nft_id: None, trustee_address: None, beneficiary_address: None, sponsor_address: None,
                 network: String::new(), node_role: String::new(),
                 escrow_balances: None, gas_balance_supra: None,
                 steps_performed: Vec::new(), steps_skipped: Vec::new(),
@@ -855,7 +855,7 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
             Err(e) => {
                 let mut r = SetupResult {
                     success: false, mode: SetupMode::ConfigWithKeystore,
-                    nft_id: None, trustee_address: None, beneficiary_address: None,
+                    nft_id: None, trustee_address: None, beneficiary_address: None, sponsor_address: None,
                     network: String::new(), node_role: String::new(),
                     escrow_balances: None, gas_balance_supra: None,
                     steps_performed: Vec::new(), steps_skipped: Vec::new(),
@@ -1029,7 +1029,7 @@ async fn run_restore_setup_and_exit(data_dir: &std::path::Path) -> ! {
         Err(e) => {
             let mut r = SetupResult {
                 success: false, mode: SetupMode::Restore,
-                nft_id: None, trustee_address: None, beneficiary_address: None,
+                nft_id: None, trustee_address: None, beneficiary_address: None, sponsor_address: None,
                 network: String::new(), node_role: String::new(),
                 escrow_balances: None, gas_balance_supra: None,
                 steps_performed: Vec::new(), steps_skipped: Vec::new(),

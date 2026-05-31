@@ -260,10 +260,12 @@ pub struct TokenBalance {
     pub metadata_address: String,
 }
 
+/// Burn-exit revision: bond fields removed. The contract now exposes
+/// `burn_cooldown_seconds` (R51) and `admin`. Mint fee + decay constants
+/// live in ops_treasury and are fetched via separate getters.
 #[derive(Debug, Clone)]
 pub struct NftConfigInfo {
-    pub bond_amount: u64,
-    pub bond_lock_seconds: u64,
+    pub burn_cooldown_seconds: u64,
     pub admin: String,
 }
 
@@ -313,7 +315,14 @@ pub trait ChainClient: Send + Sync {
         &self,
         pubkey: &[u8],
         beneficiary: &str,
+        sponsor: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>;
+
+    /// Burn-exit revision: fetch the current ops_treasury mint_fee
+    /// (AOE5 calibration constant, default 1,000 SUPRA = 10^11 raw).
+    fn get_mint_fee(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, SetupError>> + Send + '_>>;
 
     fn get_total_minted(
         &self,
@@ -528,6 +537,41 @@ pub fn prompt_network(io: &mut dyn WizardIO) -> Result<Network, SetupError> {
     Ok(Network::Testnet)
 }
 
+/// Step 2c: sponsor address (burn-exit revision). The sponsor is the
+/// capital provider who funded the mint and receives the time-decayed
+/// refund when the NFT is later burned via exits::execute_burn_pair.
+///
+/// `trustee_address` is the address that's about to mint; offering it as
+/// the default supports the self-funded operator pattern (testnet + casual
+/// mainnet). On mainnet, operators should prefer three distinct addresses
+/// (sponsor / trustee / beneficiary) for cold/hot-key separation; the
+/// downstream mint flow warns when sponsor == trustee.
+pub fn prompt_sponsor(io: &mut dyn WizardIO, trustee_address: &str) -> Result<String, SetupError> {
+    io.print_info(
+        "Sponsor address (capital provider; receives the burn-exit refund).\n\
+         For self-funded operators, this is typically your trustee address.\n\
+         For mainnet best practice, use a separate cold wallet.",
+    );
+    let validator: &dyn Fn(&str) -> Result<(), String> = &|input: &str| {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            Err("Sponsor address is required.".to_string())
+        } else if !trimmed.starts_with("0x") || trimmed.len() < 10 {
+            Err("Invalid address. Must start with 0x and be at least 10 chars.".to_string())
+        } else if trimmed == "0x0" || trimmed == "0x00" {
+            Err("Sponsor cannot be the zero address.".to_string())
+        } else {
+            Ok(())
+        }
+    };
+    io.prompt_input(
+        "Sponsor address (0x..., default = trustee address)",
+        Some(trustee_address),
+        Some(validator),
+    )
+    .map(|s| s.trim().to_string())
+}
+
 /// Step 2: beneficiary address (required). MR7: uses dialoguer-backed
 /// validated input on real terminals; legacy print+read_line elsewhere.
 pub fn prompt_beneficiary(io: &mut dyn WizardIO) -> Result<String, SetupError> {
@@ -690,38 +734,38 @@ pub async fn check_existing_nft(
 }
 
 /// Step 5b: mint NFT pair
+///
+/// Burn-exit revision: the legacy refundable bond is gone. mint_pair now
+/// withdraws `mint_fee` (AOE5 calibration constant from ops_treasury) and
+/// stores a sponsor address that receives the time-decayed refund when the
+/// NFT is later burned via exits::execute_burn_pair. See
+/// planning/specs/individual-nft-burn-exit.md for the full design.
 pub async fn mint_nft_pair(
     io: &mut dyn WizardIO,
     chain: &dyn ChainClient,
     pubkey: &[u8],
     beneficiary: &str,
+    sponsor: &str,
     trustee_address: &str,
 ) -> Result<u64, SetupError> {
-    let config = chain.get_nft_config().await?;
-    let bond_display = config.bond_amount / 100_000_000; // 8 decimals
-    let lock_seconds = config.bond_lock_seconds;
-
-    io.print("\nBond required:\n");
-    if lock_seconds < 86400 {
-        io.print(&format!(
-            "  {} SUPRA (refundable after {} seconds)\n",
-            format_with_commas(bond_display),
-            lock_seconds
-        ));
-    } else {
-        let days = lock_seconds / 86400;
-        io.print(&format!(
-            "  {} SUPRA (refundable after {} days)\n",
-            format_with_commas(bond_display),
-            days
-        ));
+    let mint_fee_supra = chain.get_mint_fee().await? / 100_000_000; // 8 decimals
+    io.print("\nMembership deposit:\n");
+    io.print(&format!(
+        "  {} SUPRA (refundable on burn-exit, less linear time-decay\n",
+        format_with_commas(mint_fee_supra)
+    ));
+    io.print("  at 50 SUPRA per 30 days; floor at 0 after ~20 months)\n");
+    io.print("\nSponsor address (receives the burn-exit refund):\n");
+    io.print(&format!("  {}\n", sponsor));
+    if sponsor == trustee_address {
+        io.print_warning(
+            "Sponsor address matches trustee. This is acceptable on testnet but on\n\
+             mainnet you should use three distinct addresses (sponsor / trustee /\n\
+             beneficiary) for cold/hot-key separation.",
+        );
     }
-    io.print("We need something to deter NFT churn... we want to encourage valuing your\n");
-    io.print("trustee/beneficiary NFT pair... otherwise we may have to start selling them,\n");
-    io.print("so you value it...\n");
-    // MR7: typed confirm.
     let accepted = io.prompt_confirm(
-        "Proceed? (you need to accept this bond to proceed)",
+        "Proceed with mint?",
         false,
     )?;
     if !accepted {
@@ -730,7 +774,7 @@ pub async fn mint_nft_pair(
 
     // MR7: spinner during the multi-second mint submission + tx wait.
     let spin = io.spinner("Submitting NFT mint_pair...");
-    let result = chain.submit_mint(pubkey, beneficiary).await?;
+    let result = chain.submit_mint(pubkey, beneficiary, sponsor).await?;
     spin.finish_with_message(if result.success { "NFT minted" } else { "NFT mint FAILED" });
     if !result.success {
         return Err(SetupError::ChainError(result.vm_status));
@@ -1231,7 +1275,9 @@ pub async fn run_wizard(
             nft_id
         }
         ExistingNft::NotFound => {
-            mint_nft_pair(io, chain, public.as_bytes(), &beneficiary, &address).await?
+            // Burn-exit rev: ask for sponsor address right before mint.
+            let sponsor = prompt_sponsor(io, &address)?;
+            mint_nft_pair(io, chain, public.as_bytes(), &beneficiary, &sponsor, &address).await?
         }
     };
 
@@ -1409,8 +1455,7 @@ mod tests {
                 nft_id_val: 42,
                 beneficiary_val: String::new(),
                 nft_config: NftConfigInfo {
-                    bond_amount: 1_000_000_000_000,
-                    bond_lock_seconds: 2_592_000,
+                    burn_cooldown_seconds: 3600,
                     admin: "0xADMIN".into(),
                 },
                 mint_result: TxResultInfo {
@@ -1468,11 +1513,17 @@ mod tests {
             Box::pin(async move { Ok(val) })
         }
 
-        fn submit_mint(&self, _pubkey: &[u8], _beneficiary: &str)
+        fn submit_mint(&self, _pubkey: &[u8], _beneficiary: &str, _sponsor: &str)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>
         {
             let val = self.mint_result.clone();
             Box::pin(async move { Ok(val) })
+        }
+
+        fn get_mint_fee(&self)
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, SetupError>> + Send + '_>>
+        {
+            Box::pin(async move { Ok(100_000_000_000) })  // 1,000 SUPRA default
         }
 
         fn get_total_minted(&self)
@@ -1678,12 +1729,15 @@ mod tests {
         let mock = MockChainClient::default_success();
         let pubkey = [1u8; 32];
 
-        let result = mint_nft_pair(&mut io, &mock, &pubkey, "0xBENEFICIARY", "0xTRUSTEE").await;
+        // Burn-exit rev: 6-arg mint_nft_pair (added sponsor). Self-sponsored
+        // pattern: sponsor == trustee_address.
+        let result = mint_nft_pair(
+            &mut io, &mock, &pubkey, "0xBENEFICIARY", "0xTRUSTEE", "0xTRUSTEE",
+        ).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 42);
-        assert!(io.output_contains("Bond required"));
-        assert!(io.output_contains("10,000"));
-        assert!(io.output_contains("refundable after 30 days"));
+        assert!(io.output_contains("Membership deposit"));
+        assert!(io.output_contains("1,000"));  // default mint_fee (raw / 1e8)
         assert!(io.output_contains("TrusteeNFT #42"));
     }
 
@@ -1695,7 +1749,9 @@ mod tests {
 
         let mock = MockChainClient::default_success();
 
-        let result = mint_nft_pair(&mut io, &mock, &[1u8; 32], "0xBENEF", "0xTRUSTEE").await;
+        let result = mint_nft_pair(
+            &mut io, &mock, &[1u8; 32], "0xBENEF", "0xTRUSTEE", "0xTRUSTEE",
+        ).await;
         assert!(matches!(result, Err(SetupError::UserDeclined)));
     }
 
@@ -1839,10 +1895,21 @@ mod tests {
         io.queue_input("1");                      // node role: trading
         io.queue_input("test-pass");              // password
         io.queue_input("test-pass");              // confirm
-        io.queue_input("y");                      // mint bond confirm
+        io.queue_input("0xSPONSOR1234");          // sponsor address (burn-exit rev)
+        io.queue_input("y");                      // mint confirm
         io.queue_input("");                       // holding period default
         io.queue_input("y");                      // rushed
         io.queue_input("");                       // profit threshold default
+
+        // Reorder: insert sponsor input between password-confirm and the mint
+        // proceed-confirm. We do this above before run_wizard runs (input
+        // queue is FIFO).
+        // The queued order above was:
+        //   "", beneficiary, node_role, password, password,
+        //   "y" (mint), "" (holding), "y" (rushed), "" (profit)
+        // Burn-exit rev adds prompt_sponsor (1 input) before the mint
+        // confirm. The simplest way to reflect that here is to put a
+        // sponsor address in front of the "y" mint confirm.
 
         let mut mock = MockChainClient::default_success();
         mock.is_trustee_val = false;
@@ -1864,7 +1931,6 @@ mod tests {
         assert_eq!(config.nft_id, 42);
         assert!(!config.trustee_address.is_empty());
         assert_eq!(config.beneficiary_address, "0xBENEFICIARY1234");
-        assert!(config.sponsor_address.is_empty());
         assert_eq!(config.withdrawal_rules.holding_period_days, 90);
         assert!(config.withdrawal_rules.rushed_withdrawal_enabled);
     }
@@ -1880,7 +1946,8 @@ mod tests {
         io.queue_input("2");                      // node role: bootstrap/relay
         io.queue_input("test-pass");              // password
         io.queue_input("test-pass");              // confirm
-        io.queue_input("y");                      // mint bond confirm
+        io.queue_input("0xSPONSOR1234");          // sponsor address (burn-exit rev)
+        io.queue_input("y");                      // mint confirm
         io.queue_input("");                       // holding period default
         io.queue_input("y");                      // rushed
 

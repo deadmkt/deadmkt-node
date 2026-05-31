@@ -156,7 +156,13 @@ async fn test_testnet_type_deserialization() {
     println!("NftConfig: {:?}", config);
     assert!(config.is_ok(), "NftConfig deserialization failed: {:?}", config);
     let config = config.unwrap();
-    assert!(config.bond_amount > 0, "bond should be non-zero");
+    // Burn-exit rev: NftConfig no longer carries bond fields. Validate that
+    // burn_cooldown_seconds is in a plausible R51 range (1m-1d).
+    assert!(
+        config.burn_cooldown_seconds >= 60 && config.burn_cooldown_seconds <= 86_400,
+        "burn_cooldown_seconds out of plausible range: {}",
+        config.burn_cooldown_seconds,
+    );
 
     println!("\n✓ All Rust types deserialize correctly from live testnet data.");
 }
