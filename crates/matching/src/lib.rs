@@ -178,26 +178,11 @@ pub fn generate_matches(
         // Self-trade skip: same nft_id on both sides.
         // Advance the side with less remaining quantity.
         if buys[buy_idx].order.nft_id == sells[sell_idx].order.nft_id {
-            if buy_remaining <= sell_remaining {
-                sell_remaining -= buy_remaining;
-                buy_idx += 1;
-                buy_remaining = buys.get(buy_idx).map(|o| o.order.quantity).unwrap_or(0);
-                if sell_remaining == 0 {
-                    sell_idx += 1;
-                    sell_remaining =
-                        sells.get(sell_idx).map(|o| o.order.quantity).unwrap_or(0);
-                }
-            } else {
-                buy_remaining -= sell_remaining;
-                sell_idx += 1;
-                sell_remaining =
-                    sells.get(sell_idx).map(|o| o.order.quantity).unwrap_or(0);
-                if buy_remaining == 0 {
-                    buy_idx += 1;
-                    buy_remaining =
-                        buys.get(buy_idx).map(|o| o.order.quantity).unwrap_or(0);
-                }
-            }
+            advance_lesser_side(
+                buys, sells,
+                &mut buy_idx, &mut sell_idx,
+                &mut buy_remaining, &mut sell_remaining,
+            );
             continue;
         }
 
@@ -205,26 +190,11 @@ pub fn generate_matches(
 
         // Skip fills below market minimum
         if fill_qty < min_quantity {
-            if buy_remaining <= sell_remaining {
-                sell_remaining -= buy_remaining;
-                buy_idx += 1;
-                buy_remaining = buys.get(buy_idx).map(|o| o.order.quantity).unwrap_or(0);
-                if sell_remaining == 0 {
-                    sell_idx += 1;
-                    sell_remaining =
-                        sells.get(sell_idx).map(|o| o.order.quantity).unwrap_or(0);
-                }
-            } else {
-                buy_remaining -= sell_remaining;
-                sell_idx += 1;
-                sell_remaining =
-                    sells.get(sell_idx).map(|o| o.order.quantity).unwrap_or(0);
-                if buy_remaining == 0 {
-                    buy_idx += 1;
-                    buy_remaining =
-                        buys.get(buy_idx).map(|o| o.order.quantity).unwrap_or(0);
-                }
-            }
+            advance_lesser_side(
+                buys, sells,
+                &mut buy_idx, &mut sell_idx,
+                &mut buy_remaining, &mut sell_remaining,
+            );
             continue;
         }
 
@@ -307,6 +277,38 @@ pub fn compute_order_hash(order: &Order) -> [u8; 32] {
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&result);
     hash
+}
+
+/// Advance the matching cursor past the smaller side without producing a fill.
+/// Used by the self-trade skip and the below-minimum skip: both must move on
+/// without settling. Mirrors the post-fill advance -- subtract the lesser
+/// quantity from the greater side, step the consumed side(s) forward, and
+/// refill `*_remaining` from the next order (0 when that side is exhausted).
+fn advance_lesser_side(
+    buys: &[RevealedOrder],
+    sells: &[RevealedOrder],
+    buy_idx: &mut usize,
+    sell_idx: &mut usize,
+    buy_remaining: &mut u64,
+    sell_remaining: &mut u64,
+) {
+    if *buy_remaining <= *sell_remaining {
+        *sell_remaining -= *buy_remaining;
+        *buy_idx += 1;
+        *buy_remaining = buys.get(*buy_idx).map(|o| o.order.quantity).unwrap_or(0);
+        if *sell_remaining == 0 {
+            *sell_idx += 1;
+            *sell_remaining = sells.get(*sell_idx).map(|o| o.order.quantity).unwrap_or(0);
+        }
+    } else {
+        *buy_remaining -= *sell_remaining;
+        *sell_idx += 1;
+        *sell_remaining = sells.get(*sell_idx).map(|o| o.order.quantity).unwrap_or(0);
+        if *buy_remaining == 0 {
+            *buy_idx += 1;
+            *buy_remaining = buys.get(*buy_idx).map(|o| o.order.quantity).unwrap_or(0);
+        }
+    }
 }
 
 // =========================================================================
