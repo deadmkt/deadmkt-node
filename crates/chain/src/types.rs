@@ -238,6 +238,9 @@ pub fn parse_decimals_result(json: &serde_json::Value) -> Result<u8, TypesError>
     Ok(val as u8)
 }
 
+/// Protocol token decimals (EMM/KAY/TEE); fallback when a symbol is unmapped.
+const DEFAULT_TOKEN_DECIMALS: u8 = 5;
+
 #[derive(Debug, Clone)]
 pub struct TokenDecimalsMap {
     map: HashMap<String, u8>,
@@ -253,13 +256,13 @@ impl TokenDecimalsMap {
     }
 
     pub fn to_smallest(&self, symbol: &str, human: f64) -> u64 {
-        let decimals = self.map.get(symbol).copied().unwrap_or(5);
+        let decimals = self.map.get(symbol).copied().unwrap_or(DEFAULT_TOKEN_DECIMALS);
         let factor = 10u64.pow(decimals as u32);
         (human * factor as f64) as u64
     }
 
     pub fn to_human(&self, symbol: &str, smallest: u64) -> f64 {
-        let decimals = self.map.get(symbol).copied().unwrap_or(5);
+        let decimals = self.map.get(symbol).copied().unwrap_or(DEFAULT_TOKEN_DECIMALS);
         let factor = 10u64.pow(decimals as u32);
         smallest as f64 / factor as f64
     }

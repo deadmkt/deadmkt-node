@@ -205,10 +205,7 @@ async fn main() {
             ];
 
             // Chain ID
-            let chain_id = match config.network {
-                deadmkt_config::Network::Testnet => 6u8,
-                deadmkt_config::Network::Mainnet => 1u8,
-            };
+            let chain_id = config.network.chain_id();
 
             let client = deadmkt_chain::client::SupraClient::new(
                 config.rpc_urls.clone(),
@@ -315,10 +312,7 @@ async fn main() {
                 .expect("invalid trustee address");
             let contract_addr = deadmkt_settlement::parse_address(&config.contracts.settlement)
                 .expect("invalid contract address");
-            let chain_id = match config.network {
-                deadmkt_config::Network::Testnet => 6u8,
-                deadmkt_config::Network::Mainnet => 1u8,
-            };
+            let chain_id = config.network.chain_id();
             let sender_hex = format!("0x{}", hex::encode(sender_addr));
 
             // Step 2: try escrow::reactivate() for instant recovery.
@@ -535,10 +529,7 @@ async fn main() {
             let contract_addr = deadmkt_settlement::parse_address(&config.contracts.pool_config)
                 .expect("invalid pool_config address");
 
-            let chain_id = match config.network {
-                deadmkt_config::Network::Testnet => 6u8,
-                deadmkt_config::Network::Mainnet => 1u8,
-            };
+            let chain_id = config.network.chain_id();
 
             let client = deadmkt_chain::client::SupraClient::new(
                 config.rpc_urls.clone(),
@@ -632,10 +623,7 @@ async fn main() {
             let contract_addr = deadmkt_settlement::parse_address(&config.contracts.pool_config)
                 .expect("invalid pool_config address");
 
-            let chain_id = match config.network {
-                deadmkt_config::Network::Testnet => 6u8,
-                deadmkt_config::Network::Mainnet => 1u8,
-            };
+            let chain_id = config.network.chain_id();
 
             let client = deadmkt_chain::client::SupraClient::new(
                 config.rpc_urls.clone(),
@@ -780,10 +768,11 @@ async fn run_burn_pair_and_exit(action: BurnPairAction, json: bool, password_std
             );
             match chain_for_view.preview_burn_refund(config.nft_id).await {
                 Ok(refund_raw) => {
+                    const SUPRA_DECIMALS_FACTOR: f64 = 100_000_000.0; // SUPRA has 8 decimals
                     let fields = serde_json::json!({
                         "nft_id": config.nft_id,
                         "preview_refund_raw": refund_raw,
-                        "preview_refund_supra": (refund_raw as f64) / 100_000_000.0,
+                        "preview_refund_supra": (refund_raw as f64) / SUPRA_DECIMALS_FACTOR,
                     });
                     let out = ActionResultBuilder::new("burn-pair-preview", fields)
                         .success_read_only();
@@ -793,7 +782,7 @@ async fn run_burn_pair_and_exit(action: BurnPairAction, json: bool, password_std
                         println!(
                             "Preview refund for NFT #{}: {} SUPRA ({} raw)",
                             config.nft_id,
-                            (refund_raw as f64) / 100_000_000.0,
+                            (refund_raw as f64) / SUPRA_DECIMALS_FACTOR,
                             refund_raw,
                         );
                     }
@@ -1315,10 +1304,7 @@ async fn mr3_load_signed_chain(
         .unwrap_or_else(|| "https://rpc-testnet.supra.com".into());
     let contract_addr = config.contracts.escrow.clone();
     let mut chain = setup_bridge::SupraSetupClient::new(vec![rpc_url], contract_addr);
-    let chain_id = match config.network {
-        Network::Testnet => 6u8,
-        Network::Mainnet => 1u8,
-    };
+    let chain_id = config.network.chain_id();
     chain.set_gas_config(chain_id, config.max_gas_amount, config.gas_unit_price);
     chain.set_signer(
         signing_key.as_bytes(),

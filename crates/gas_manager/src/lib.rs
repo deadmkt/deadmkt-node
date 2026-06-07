@@ -31,6 +31,10 @@ pub struct GasManager {
     decimals: u8,
 }
 
+/// Default gas thresholds in whole SUPRA (scaled by 10^decimals at construction).
+const DEFAULT_WARN_SUPRA: u64 = 10;
+const DEFAULT_CRITICAL_SUPRA: u64 = 1;
+
 // =========================================================================
 // Implementation
 // =========================================================================
@@ -42,8 +46,8 @@ impl GasManager {
         let factor = 10u64.pow(decimals as u32);
         Self {
             balance: 0,
-            warn_threshold: 10 * factor,
-            critical_threshold: 1 * factor,
+            warn_threshold: DEFAULT_WARN_SUPRA * factor,
+            critical_threshold: DEFAULT_CRITICAL_SUPRA * factor,
             decimals,
         }
     }

@@ -29,6 +29,19 @@ pub enum Network {
     Mainnet,
 }
 
+impl Network {
+    /// Supra chain id for this network.
+    pub fn chain_id(&self) -> u8 {
+        match self {
+            Network::Testnet => 6,
+            Network::Mainnet => 1,
+        }
+    }
+}
+
+/// Upper bound on holding_period_days (matches the contract's escrow::register_trader bound).
+pub const MAX_HOLDING_PERIOD_DAYS: u32 = 367;
+
 // =========================================================================
 // Config structs
 // =========================================================================
@@ -275,7 +288,7 @@ impl NodeConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         // withdrawal_rules
         if self.withdrawal_rules.holding_period_days < 1
-            || self.withdrawal_rules.holding_period_days > 367
+            || self.withdrawal_rules.holding_period_days > MAX_HOLDING_PERIOD_DAYS
         {
             return Err(ConfigError::ValidationError(
                 "holding_period_days must be 1-367".into(),
@@ -548,7 +561,7 @@ mod tests {
         config.withdrawal_rules.holding_period_days = 1;
         assert!(config.validate().is_ok());
 
-        config.withdrawal_rules.holding_period_days = 367;
+        config.withdrawal_rules.holding_period_days = MAX_HOLDING_PERIOD_DAYS;
         assert!(config.validate().is_ok());
 
         config.withdrawal_rules.holding_period_days = 0;

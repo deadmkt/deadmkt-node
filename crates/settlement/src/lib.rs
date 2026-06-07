@@ -517,14 +517,16 @@ impl SettlementSubmitter {
         sender_addr: &str,
         chain_id: u8,
     ) -> Result<Self, SettlementError> {
+        const DEFAULT_MAX_GAS: u64 = 200;
+        const DEFAULT_GAS_PRICE: u64 = 100_000;
         Ok(Self {
             client,
             signing_key,
             contract_addr: parse_address(contract_addr)?,
             sender_addr: parse_address(sender_addr)?,
             chain_id,
-            max_gas: 200,
-            gas_price: 100_000,
+            max_gas: DEFAULT_MAX_GAS,
+            gas_price: DEFAULT_GAS_PRICE,
         })
     }
 

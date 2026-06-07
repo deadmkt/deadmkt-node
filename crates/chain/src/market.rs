@@ -26,14 +26,15 @@ impl<'a> MarketConfigCache<'a> {
         let pair = self.client.get_market_pair_config(symbol).await?;
 
         let symbol_str = String::from_utf8_lossy(symbol).to_string();
+        const DEFAULT_TOKEN_DECIMALS: u32 = 5; // Trippples tokens are all 5 decimals
         self.storage
             .upsert_market_pair(
                 &symbol_str,
                 pair.min_quantity,
                 &pair.base_metadata,
                 &pair.quote_metadata,
-                5, // default decimals — Trippples tokens are all 5 decimal places
-                5,
+                DEFAULT_TOKEN_DECIMALS, // Trippples tokens are all 5 decimal places
+                DEFAULT_TOKEN_DECIMALS,
                 pair.is_active,
             )
             .map_err(|e| ChainError::DeserializationError(e.to_string()))?;
