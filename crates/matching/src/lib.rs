@@ -219,13 +219,20 @@ pub fn generate_matches(
 
         let fill_qty = min(buy_remaining, sell_remaining);
 
-        // Skip fills below market minimum
+        // Below the market minimum: the smaller side's entire remaining is
+        // under min_quantity ("dust") and can never produce a valid fill, so
+        // advance PAST it without consuming the larger side -- the larger order
+        // keeps its full quantity for the next counterparty. (Consuming it here
+        // would silently shrink a healthy order; that was MATCH-2.) On a tie,
+        // advance the buy. Deterministic: a pure function of the sorted books.
         if fill_qty < min_quantity {
-            advance_lesser_side(
-                buys, sells,
-                &mut buy_idx, &mut sell_idx,
-                &mut buy_remaining, &mut sell_remaining,
-            );
+            if buy_remaining <= sell_remaining {
+                buy_idx += 1;
+                buy_remaining = buys.get(buy_idx).map(|o| o.order.quantity).unwrap_or(0);
+            } else {
+                sell_idx += 1;
+                sell_remaining = sells.get(sell_idx).map(|o| o.order.quantity).unwrap_or(0);
+            }
             continue;
         }
 
@@ -308,38 +315,6 @@ pub fn compute_order_hash(order: &Order) -> [u8; 32] {
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&result);
     hash
-}
-
-/// Advance the matching cursor past the smaller side without producing a fill.
-/// Used by the self-trade skip and the below-minimum skip: both must move on
-/// without settling. Mirrors the post-fill advance -- subtract the lesser
-/// quantity from the greater side, step the consumed side(s) forward, and
-/// refill `*_remaining` from the next order (0 when that side is exhausted).
-fn advance_lesser_side(
-    buys: &[RevealedOrder],
-    sells: &[RevealedOrder],
-    buy_idx: &mut usize,
-    sell_idx: &mut usize,
-    buy_remaining: &mut u64,
-    sell_remaining: &mut u64,
-) {
-    if *buy_remaining <= *sell_remaining {
-        *sell_remaining -= *buy_remaining;
-        *buy_idx += 1;
-        *buy_remaining = buys.get(*buy_idx).map(|o| o.order.quantity).unwrap_or(0);
-        if *sell_remaining == 0 {
-            *sell_idx += 1;
-            *sell_remaining = sells.get(*sell_idx).map(|o| o.order.quantity).unwrap_or(0);
-        }
-    } else {
-        *buy_remaining -= *sell_remaining;
-        *sell_idx += 1;
-        *sell_remaining = sells.get(*sell_idx).map(|o| o.order.quantity).unwrap_or(0);
-        if *buy_remaining == 0 {
-            *buy_idx += 1;
-            *buy_remaining = buys.get(*buy_idx).map(|o| o.order.quantity).unwrap_or(0);
-        }
-    }
 }
 
 // =========================================================================
@@ -857,6 +832,102 @@ mod tests {
         // min_quantity = 10, but sell only has 5
         let matches = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 10);
         assert!(matches.is_empty());
+    }
+
+    // -- T_MATCH_12b: below-min "dust" buy must not consume the sell (MATCH-2) --
+
+    #[test]
+    fn test_match_12b_below_min_skip_preserves_sell() {
+        // min_quantity = 10. The dust buy (q5) is below min and must be skipped
+        // WITHOUT eating into the sell, so the next buy fills it fully.
+        let buy_dust = make_revealed(make_order_with_nonce(1, EMM_KAY, BUY, 52, 5, 0x01));
+        let buy_ok = make_revealed(make_order_with_nonce(2, EMM_KAY, BUY, 50, 100, 0x02));
+        let sell = make_revealed(make_order_with_nonce(3, EMM_KAY, SELL, 48, 100, 0x03));
+
+        let mut buys = vec![buy_dust, buy_ok];
+        let mut sells = vec![sell];
+        sort_orders(&mut buys, &mut sells);
+
+        let matches = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 10);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].buyer.order.nft_id, 2);
+        assert_eq!(matches[0].fill_quantity, 100); // full -- the buggy path gave 95
+    }
+
+    // -- T_MATCH_12c: below-min "dust" sell must not consume the buy (MATCH-2) --
+
+    #[test]
+    fn test_match_12c_below_min_skip_preserves_buy() {
+        let buy = make_revealed(make_order_with_nonce(1, EMM_KAY, BUY, 50, 100, 0x01));
+        let sell_dust = make_revealed(make_order_with_nonce(2, EMM_KAY, SELL, 46, 5, 0x02));
+        let sell_ok = make_revealed(make_order_with_nonce(3, EMM_KAY, SELL, 48, 100, 0x03));
+
+        let mut buys = vec![buy];
+        let mut sells = vec![sell_dust, sell_ok];
+        sort_orders(&mut buys, &mut sells);
+
+        let matches = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 10);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].seller.order.nft_id, 3);
+        assert_eq!(matches[0].fill_quantity, 100);
+    }
+
+    // -- T_MATCH_12d: randomized min_quantity invariants --
+
+    #[test]
+    fn test_match_12d_min_quantity_invariants_randomized() {
+        let mut state: u64 = 0x243F6A8885A308D3;
+        let next = |s: &mut u64| -> u64 {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *s >> 33
+        };
+        let min_qs = [1u64, 3, 10, 30];
+
+        for _iter in 0..400 {
+            let min_q = min_qs[(next(&mut state) % 4) as usize];
+            let n = (next(&mut state) % 8) as usize + 2;
+            let mut buys = Vec::new();
+            let mut sells = Vec::new();
+            for k in 0..n {
+                let nft_id = next(&mut state) % 4;
+                let side = (next(&mut state) % 2) as u8;
+                let price = 40 + (next(&mut state) % 20);
+                let qty = 1 + (next(&mut state) % 60);
+                let order = make_order_with_nonce(nft_id, EMM_KAY, side, price, qty, k as u8);
+                let rev = make_revealed(order);
+                if side == BUY {
+                    buys.push(rev);
+                } else {
+                    sells.push(rev);
+                }
+            }
+            sort_orders(&mut buys, &mut sells);
+            let matches = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, min_q);
+
+            let mut filled: std::collections::HashMap<[u8; 32], u64> =
+                std::collections::HashMap::new();
+            for m in &matches {
+                assert_ne!(m.buyer.order.nft_id, m.seller.order.nft_id, "self-trade emitted");
+                assert!(m.buyer.order.price >= m.seller.order.price, "non-crossing match");
+                assert!(m.fill_quantity >= min_q, "sub-minimum fill emitted");
+                *filled.entry(m.buyer.order_hash).or_default() += m.fill_quantity;
+                *filled.entry(m.seller.order_hash).or_default() += m.fill_quantity;
+            }
+            for r in buys.iter().chain(sells.iter()) {
+                if let Some(&f) = filled.get(&r.order_hash) {
+                    assert!(f <= r.order.quantity, "over-fill");
+                }
+            }
+            let again = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, min_q);
+            assert_eq!(
+                matches.iter().map(|m| m.match_hash).collect::<Vec<_>>(),
+                again.iter().map(|m| m.match_hash).collect::<Vec<_>>(),
+            );
+        }
     }
 
     // -- T_MATCH_13: Gas payer — lower hash pays --
