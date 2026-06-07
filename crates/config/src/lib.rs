@@ -141,7 +141,9 @@ fn default_rpc_urls(network: &Network) -> Vec<String> {
 /// All modules live under a single deployer address.
 pub fn default_contract_addresses(network: &Network) -> ContractAddresses {
     let addr = match network {
-        Network::Testnet => "0x9b8fd778b08131297d22b577c1f4e2f6ed85d04479cd73e0eb14bbf41fc6731c",
+        // Tracks the active testnet deploy; override per-node via DEADMKT_CONTRACT_ADDR.
+        // DMKT13 (the cleanup/cr1 deploy revision); was DMKT12 0x9b8fd778...731c.
+        Network::Testnet => "0x7bbf47b7a9d5a94cd9aaccf5039dcd34647e521615db47a1d5b2141ccf00a55f",
         Network::Mainnet => "", // TBD at mainnet launch
     };
     ContractAddresses {
@@ -356,6 +358,11 @@ pub fn generate_strategy_auth_token() -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    // Serializes tests that mutate the process-global DEADMKT_* env vars so they
+    // don't race under cargo's parallel test threads. Recovers from poisoning so
+    // one failing assertion doesn't cascade into poison errors on the others.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn make_default_config() -> NodeConfig {
         NodeConfig {
@@ -589,6 +596,7 @@ mod tests {
     // T_CFG_09: DEADMKT_CONTRACT_ADDR blanket override
     #[test]
     fn test_env_override_blanket_contract_addr() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = make_default_config();
         assert_eq!(config.contracts.settlement, "0xS");
 
@@ -606,6 +614,7 @@ mod tests {
     // T_CFG_10: Per-module override takes precedence over blanket
     #[test]
     fn test_env_override_per_module_precedence() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = make_default_config();
 
         std::env::set_var("DEADMKT_CONTRACT_ADDR", "0xBLANKET");
@@ -625,6 +634,7 @@ mod tests {
     // T_CFG_11: Empty env var does not override
     #[test]
     fn test_env_override_empty_ignored() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = make_default_config();
         assert_eq!(config.contracts.settlement, "0xS");
 

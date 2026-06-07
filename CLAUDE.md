@@ -55,9 +55,11 @@ cargo test
 
 ## Contract
 
-Address (DMKT12): `0x9b8fd778b08131297d22b577c1f4e2f6ed85d04479cd73e0eb14bbf41fc6731c`
+Address (DMKT13, deploy target): `0x7bbf47b7a9d5a94cd9aaccf5039dcd34647e521615db47a1d5b2141ccf00a55f`
 Chain: Supra Testnet (chain_id: 6)
-5 modules: nft, escrow, settlement, pool_config, tokens
+7 modules: nft, escrow, settlement, pool_config, tokens, exits, ops_treasury
+
+> Note: DMKT13 is the reserved deploy target this build defaults to (the `cleanup/cr1` revision); not yet published on-chain. DMKT12 (`0x9b8fd778...731c`) remains the live deploy until the coordinated DMKT13 redeploy. Per-node override: `DEADMKT_CONTRACT_ADDR`.
 
 ## Reference Docs
 
