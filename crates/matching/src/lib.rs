@@ -175,14 +175,45 @@ pub fn generate_matches(
             break;
         }
 
-        // Self-trade skip: same nft_id on both sides.
-        // Advance the side with less remaining quantity.
+        // Self-trade: the same NFT on both sides cannot trade -- the contract
+        // rejects it (settlement::E_SELF_TRADE), so the node must never emit
+        // such a match. Skip exactly ONE order WITHOUT consuming the other,
+        // advancing the side whose top order is "doomed" (has no crossing,
+        // distinct-NFT counterparty left). We SCAN the remaining books rather
+        // than peek one ahead: a run of same-NFT orders can hide a valid
+        // deeper counterparty (see T_MATCH_09f / 09g). The decision is a pure
+        // function of the sorted books, so it stays deterministic across nodes.
+        //
+        // Known limitation: when BOTH top orders still have alternatives (e.g.
+        // buys nft[1,2] vs sells nft[1,2] all crossing), a single-advance
+        // two-pointer can keep only one, leaving one match on the table. It
+        // still never emits a self-trade and stays deterministic.
         if buys[buy_idx].order.nft_id == sells[sell_idx].order.nft_id {
-            advance_lesser_side(
-                buys, sells,
-                &mut buy_idx, &mut sell_idx,
-                &mut buy_remaining, &mut sell_remaining,
-            );
+            let buy_price = buys[buy_idx].order.price;
+            let buy_nft = buys[buy_idx].order.nft_id;
+            let sell_price = sells[sell_idx].order.price;
+            let sell_nft = sells[sell_idx].order.nft_id;
+
+            // Does this BUY have a crossing, distinct-NFT sell remaining?
+            let buy_has_alt = sells[sell_idx..]
+                .iter()
+                .any(|s| buy_price >= s.order.price && buy_nft != s.order.nft_id);
+            // Does this SELL have a crossing, distinct-NFT buy remaining?
+            let sell_has_alt = buys[buy_idx..]
+                .iter()
+                .any(|b| b.order.price >= sell_price && b.order.nft_id != sell_nft);
+
+            if buy_has_alt && !sell_has_alt {
+                // The sell is doomed; keep the buy for its later counterparty.
+                sell_idx += 1;
+                sell_remaining = sells.get(sell_idx).map(|o| o.order.quantity).unwrap_or(0);
+            } else {
+                // The buy is doomed, neither has an alternative (progress), or
+                // both still do (keep the sell -- deterministic tiebreak):
+                // advance the buy.
+                buy_idx += 1;
+                buy_remaining = buys.get(buy_idx).map(|o| o.order.quantity).unwrap_or(0);
+            }
             continue;
         }
 
@@ -558,6 +589,196 @@ mod tests {
             matches[0].buyer.order.nft_id,
             matches[0].seller.order.nft_id
         );
+    }
+
+    // -- T_MATCH_09b: Self-trade skip, sell-side passthrough (mirror of 09) --
+
+    #[test]
+    fn test_match_09b_self_trade_passthrough_sell_side() {
+        // The single buy self-trades the top sell (nft=42), but a later
+        // still-crossing sell (nft=99) can match.
+        let buy = make_revealed(make_order(42, EMM_KAY, BUY, 50, 100));
+        let sell_self = make_revealed(make_order_with_nonce(42, EMM_KAY, SELL, 48, 100, 0xAA));
+        let sell_ok = make_revealed(make_order_with_nonce(99, EMM_KAY, SELL, 49, 100, 0xBB));
+
+        let mut buys = vec![buy];
+        let mut sells = vec![sell_self, sell_ok];
+        sort_orders(&mut buys, &mut sells);
+
+        let matches = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 1);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].fill_quantity, 100);
+        assert_eq!(matches[0].seller.order.nft_id, 99);
+        assert_ne!(matches[0].buyer.order.nft_id, matches[0].seller.order.nft_id);
+    }
+
+    // -- T_MATCH_09c: consecutive self-trade buys, then a good buy matches --
+
+    #[test]
+    fn test_match_09c_consecutive_self_trade_buys() {
+        let buy_a = make_revealed(make_order_with_nonce(42, EMM_KAY, BUY, 52, 100, 0x01));
+        let buy_b = make_revealed(make_order_with_nonce(42, EMM_KAY, BUY, 51, 100, 0x02));
+        let buy_c = make_revealed(make_order_with_nonce(99, EMM_KAY, BUY, 50, 100, 0x03));
+        let sell = make_revealed(make_order(42, EMM_KAY, SELL, 48, 100));
+
+        let mut buys = vec![buy_a, buy_b, buy_c];
+        let mut sells = vec![sell];
+        sort_orders(&mut buys, &mut sells);
+
+        let matches = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 1);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].buyer.order.nft_id, 99);
+        assert_ne!(matches[0].buyer.order.nft_id, matches[0].seller.order.nft_id);
+    }
+
+    // -- T_MATCH_09d: a cross-self 2x2 book never emits a self-trade --
+
+    #[test]
+    fn test_match_09d_no_self_trade_emitted() {
+        let buy_a = make_revealed(make_order_with_nonce(1, EMM_KAY, BUY, 50, 100, 0x11));
+        let buy_b = make_revealed(make_order_with_nonce(2, EMM_KAY, BUY, 50, 100, 0x22));
+        let sell_a = make_revealed(make_order_with_nonce(1, EMM_KAY, SELL, 48, 100, 0x33));
+        let sell_b = make_revealed(make_order_with_nonce(2, EMM_KAY, SELL, 48, 100, 0x44));
+
+        let mut buys = vec![buy_a, buy_b];
+        let mut sells = vec![sell_a, sell_b];
+        sort_orders(&mut buys, &mut sells);
+
+        let matches = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 1);
+
+        // At least one valid match, and NONE is a self-trade.
+        assert!(!matches.is_empty());
+        for m in &matches {
+            assert_ne!(m.buyer.order.nft_id, m.seller.order.nft_id);
+        }
+        // Deterministic: identical inputs -> identical match hashes.
+        let again = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 1);
+        let h1: Vec<_> = matches.iter().map(|m| m.match_hash).collect();
+        let h2: Vec<_> = again.iter().map(|m| m.match_hash).collect();
+        assert_eq!(h1, h2);
+    }
+
+    // -- T_MATCH_09e: randomized self-trade-prevention invariants --
+
+    #[test]
+    fn test_match_09e_stp_invariants_randomized() {
+        // Tiny deterministic LCG -- no external rng dependency.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let next = |s: &mut u64| -> u64 {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *s >> 33
+        };
+
+        for _iter in 0..400 {
+            let n = (next(&mut state) % 8) as usize + 2; // 2..=9 orders
+            let mut buys = Vec::new();
+            let mut sells = Vec::new();
+            for k in 0..n {
+                let nft_id = next(&mut state) % 4; // small range -> frequent self-trades
+                let side = (next(&mut state) % 2) as u8; // 0 sell, 1 buy
+                let price = 40 + (next(&mut state) % 20); // 40..=59
+                let qty = 1 + (next(&mut state) % 100); // 1..=100
+                let order = make_order_with_nonce(nft_id, EMM_KAY, side, price, qty, k as u8);
+                let rev = make_revealed(order);
+                if side == BUY {
+                    buys.push(rev);
+                } else {
+                    sells.push(rev);
+                }
+            }
+            sort_orders(&mut buys, &mut sells);
+            let matches = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 1);
+
+            let mut filled: std::collections::HashMap<[u8; 32], u64> =
+                std::collections::HashMap::new();
+            for m in &matches {
+                // (1) never a self-trade (contract would reject it)
+                assert_ne!(m.buyer.order.nft_id, m.seller.order.nft_id, "self-trade emitted");
+                // (2) crossed on price + positive fill
+                assert!(m.buyer.order.price >= m.seller.order.price, "non-crossing match");
+                assert!(m.fill_quantity >= 1, "zero fill");
+                *filled.entry(m.buyer.order_hash).or_default() += m.fill_quantity;
+                *filled.entry(m.seller.order_hash).or_default() += m.fill_quantity;
+            }
+            // (3) conservation: no order filled beyond its quantity
+            for r in buys.iter().chain(sells.iter()) {
+                if let Some(&f) = filled.get(&r.order_hash) {
+                    assert!(f <= r.order.quantity, "over-fill");
+                }
+            }
+            // (4) empty output ONLY when no crossing distinct-nft pair exists
+            //     (guards against the self-trade skip stranding a valid match)
+            if matches.is_empty() {
+                for b in &buys {
+                    for s in &sells {
+                        assert!(
+                            !(b.order.price >= s.order.price
+                                && b.order.nft_id != s.order.nft_id),
+                            "empty output but a crossing distinct-nft pair exists"
+                        );
+                    }
+                }
+            }
+            // (5) determinism within process
+            let again = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 1);
+            assert_eq!(
+                matches.iter().map(|m| m.match_hash).collect::<Vec<_>>(),
+                again.iter().map(|m| m.match_hash).collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    // -- T_MATCH_09f: self-trade skip must not strand a clean distinct match
+    //    (regression for the adversarial dropped-match counterexample) --
+
+    #[test]
+    fn test_match_09f_self_trade_no_strand() {
+        // Only nft 2 appears on both sides; buy nft2@4 has a clean match with
+        // sell nft3@4. A one-deep lookahead wrongly advanced the buy here
+        // because the next buy (also nft2) crossed the sell on price.
+        let buy_hi = make_revealed(make_order_with_nonce(2, EMM_KAY, BUY, 4, 3, 0x01));
+        let buy_lo = make_revealed(make_order_with_nonce(2, EMM_KAY, BUY, 2, 2, 0x02));
+        let sell_self = make_revealed(make_order_with_nonce(2, EMM_KAY, SELL, 2, 1, 0x03));
+        let sell_ok = make_revealed(make_order_with_nonce(3, EMM_KAY, SELL, 4, 3, 0x04));
+
+        let mut buys = vec![buy_hi, buy_lo];
+        let mut sells = vec![sell_self, sell_ok];
+        sort_orders(&mut buys, &mut sells);
+
+        let matches = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 1);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].buyer.order.nft_id, 2);
+        assert_eq!(matches[0].seller.order.nft_id, 3);
+        assert_eq!(matches[0].fill_quantity, 3);
+    }
+
+    // -- T_MATCH_09g: a run of same-nft orders must not hide a valid deeper
+    //    counterparty (a 2-deep variant that one-deep lookahead also failed) --
+
+    #[test]
+    fn test_match_09g_self_trade_deep_scan() {
+        let buy_a = make_revealed(make_order_with_nonce(1, EMM_KAY, BUY, 10, 5, 0x01));
+        let buy_b = make_revealed(make_order_with_nonce(1, EMM_KAY, BUY, 9, 5, 0x02));
+        let sell_a = make_revealed(make_order_with_nonce(1, EMM_KAY, SELL, 5, 5, 0x03));
+        let sell_b = make_revealed(make_order_with_nonce(1, EMM_KAY, SELL, 6, 5, 0x04));
+        let sell_c = make_revealed(make_order_with_nonce(2, EMM_KAY, SELL, 7, 5, 0x05));
+
+        let mut buys = vec![buy_a, buy_b];
+        let mut sells = vec![sell_a, sell_b, sell_c];
+        sort_orders(&mut buys, &mut sells);
+
+        let matches = generate_matches(BATCH_ID, POOL_ID, EMM_KAY, &buys, &sells, 1);
+
+        // buy nft1@10 must reach and match sell nft2@7 past the nft1 run.
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].buyer.order.nft_id, 1);
+        assert_eq!(matches[0].seller.order.nft_id, 2);
+        assert_eq!(matches[0].fill_quantity, 5);
     }
 
     // -- T_MATCH_10: Price sort — highest buy matches lowest sell --
