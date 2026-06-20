@@ -77,7 +77,7 @@ pub enum StrategyEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuthOkDetails {
     pub trustee_address: String,
-    pub beneficiary_address: String,
+    pub payout_address: String,
     pub markets: Vec<String>,
     pub token_decimals: HashMap<String, u8>,
     pub price_decimals: u8,
@@ -322,7 +322,7 @@ impl StrategyEvent {
                 });
                 if let Some(details) = auth_details {
                     obj["trustee_address"] = serde_json::json!(details.trustee_address);
-                    obj["beneficiary_address"] = serde_json::json!(details.beneficiary_address);
+                    obj["payout_address"] = serde_json::json!(details.payout_address);
                     obj["markets"] = serde_json::json!(details.markets);
                     obj["token_decimals"] = serde_json::json!(details.token_decimals);
                     obj["price_decimals"] = serde_json::json!(details.price_decimals);
@@ -525,7 +525,7 @@ pub enum StrategyAction {
     Mint { m_amount: u64, k_amount: u64, t_amount: u64 },
     ClaimMint,
     BurnFromEscrow { amount: u64 },
-    BurnToBeneficiary { amount: u64 },
+    BurnForProfit { amount: u64 },
     Lock { symbol: String, amount: u64, duration_secs: u64 },
     Unlock { lock_index: u64 },
     DonateDust { recipient_nft_id: u64, symbol: String, amount: u64 },
@@ -539,7 +539,7 @@ impl StrategyAction {
             StrategyAction::Mint { .. } |
             StrategyAction::ClaimMint |
             StrategyAction::BurnFromEscrow { .. } |
-            StrategyAction::BurnToBeneficiary { .. } |
+            StrategyAction::BurnForProfit { .. } |
             StrategyAction::Lock { .. } |
             StrategyAction::Unlock { .. } |
             StrategyAction::DonateDust { .. }
@@ -618,10 +618,10 @@ impl StrategyAction {
                     .ok_or_else(|| StrategyError::ParseError("missing 'index' field".into()))?;
                 Ok(StrategyAction::Unlock { lock_index: index })
             }
-            "burn_to_beneficiary" => {
+            "burn_for_profit" => {
                 let amount = json.get("amount").and_then(|v| v.as_u64())
                     .ok_or_else(|| StrategyError::ParseError("missing 'amount' field".into()))?;
-                Ok(StrategyAction::BurnToBeneficiary { amount })
+                Ok(StrategyAction::BurnForProfit { amount })
             }
             "donate_dust" => {
                 let nft_id = json.get("recipient_nft_id").and_then(|v| v.as_u64())
@@ -945,7 +945,7 @@ mod tests {
         assert!(StrategyAction::Mint { m_amount: 1, k_amount: 1, t_amount: 1 }.is_token_action());
         assert!(StrategyAction::ClaimMint.is_token_action());
         assert!(StrategyAction::BurnFromEscrow { amount: 1 }.is_token_action());
-        assert!(StrategyAction::BurnToBeneficiary { amount: 1 }.is_token_action());
+        assert!(StrategyAction::BurnForProfit { amount: 1 }.is_token_action());
         assert!(StrategyAction::Lock { symbol: "EMM".into(), amount: 1, duration_secs: 1 }.is_token_action());
         assert!(StrategyAction::Unlock { lock_index: 0 }.is_token_action());
         assert!(StrategyAction::DonateDust { recipient_nft_id: 1, symbol: "EMM".into(), amount: 1 }.is_token_action());

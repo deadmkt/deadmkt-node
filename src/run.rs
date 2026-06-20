@@ -864,7 +864,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let strategy_addr = format!("0.0.0.0:{}", config.strategy_port);
     let auth_details = deadmkt_strategy::AuthOkDetails {
         trustee_address: config.trustee_address.clone(),
-        beneficiary_address: config.beneficiary_address.clone(),
+        payout_address: config.payout_address.clone(),
         markets: config.markets.clone(),
         token_decimals: token_decimals.clone(),
         price_decimals: 8,
@@ -912,6 +912,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
             token_rx,
             strategy_server.event_sender(),
             tx_lock.clone(),
+            config.payout_address.clone(),
         )
     };
     println!("  Tokens:   worker started");
@@ -944,11 +945,6 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
     let mr2_liveness_successes = Arc::new(AtomicU64::new(0));
     let mr2_settle_submits_total = Arc::new(AtomicU64::new(0));
     let mr2_settle_aborts_total = Arc::new(AtomicU64::new(0));
-    // Burn-exit (DMKT13): trustee's own NFT burn-request state. 0/1 flag
-    // packed in an AtomicU64 to keep the snapshot-read pattern symmetric
-    // with the rest of the MR2 atomics. Updated by the liveness poller.
-    let mr2_burn_requested = Arc::new(AtomicU64::new(0));
-    let mr2_burn_requested_at_batch = Arc::new(AtomicU64::new(0));
     let mr2_pending_mint: Arc<std::sync::Mutex<Option<Mr2PendingMint>>> =
         Arc::new(std::sync::Mutex::new(None));
 
@@ -1322,7 +1318,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
         let identity_role = if bootstrap_mode { "bootstrap" } else { "trading" }.to_string();
         let identity_nft_id = config.nft_id;
         let identity_trustee = config.trustee_address.clone();
-        let identity_beneficiary = config.beneficiary_address.clone();
+        let identity_payout = config.payout_address.clone();
 
         let health_peers = gossip_peer_count.clone();
         let health_block = last_block_health;
@@ -1342,8 +1338,6 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
         let s_liveness_attempts = mr2_liveness_attempts.clone();
         let s_liveness_successes = mr2_liveness_successes.clone();
         let s_settle_submits = mr2_settle_submits_total.clone();
-        let s_burn_requested = mr2_burn_requested.clone();
-        let s_burn_requested_at_batch = mr2_burn_requested_at_batch.clone();
         let s_settle_aborts = mr2_settle_aborts_total.clone();
         let s_pending_mint = mr2_pending_mint.clone();
 
@@ -1384,7 +1378,7 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             &identity_role,
                             identity_nft_id,
                             &identity_trustee,
-                            &identity_beneficiary,
+                            &identity_payout,
                             s_uptime_batches.load(Ordering::Relaxed),
                             s_current_batch.load(Ordering::Relaxed),
                             s_current_phase.load(Ordering::Relaxed),
@@ -1405,8 +1399,6 @@ pub async fn run(data_dir: &Path, keystore_mode: KeystoreMode) -> Result<(), Box
                             s_settle_submits.load(Ordering::Relaxed),
                             s_settle_aborts.load(Ordering::Relaxed),
                             s_pending_mint.lock().ok().and_then(|g| g.clone()),
-                            s_burn_requested.load(Ordering::Relaxed) != 0,
-                            s_burn_requested_at_batch.load(Ordering::Relaxed),
                         );
 
                         let resp = format!(
@@ -3047,7 +3039,7 @@ pub(crate) fn build_status_v1_json(
     node_role: &str,
     nft_id: u64,
     trustee: &str,
-    beneficiary: &str,
+    payout: &str,
     uptime_batches: u64,
     current_batch: u64,
     current_phase_u8: u8,
@@ -3068,11 +3060,6 @@ pub(crate) fn build_status_v1_json(
     settle_submits_total: u64,
     settle_aborts_total: u64,
     pending_mint: Option<Mr2PendingMint>,
-    // Burn-exit (DMKT13): trustee's own NFT burn-request state. Updated by
-    // the main loop polling nft::is_burn_requested + nft::get_burn_request_batch
-    // (cheap views, polled at heartbeat cadence).
-    burn_requested: bool,
-    burn_requested_at_batch: u64,
 ) -> String {
     let phase_str = match current_phase_u8 {
         0 => "Commit",
@@ -3121,21 +3108,20 @@ pub(crate) fn build_status_v1_json(
 \"schema_version\":\"v1\",\
 \"node_running\":true,\
 \"timestamp_unix\":{ts},\
-\"identity\":{{\"network\":\"{network}\",\"node_role\":\"{role}\",\"nft_id\":{nft_id},\"trustee_address\":\"{trustee}\",\"beneficiary_address\":\"{benef}\"}},\
+\"identity\":{{\"network\":\"{network}\",\"node_role\":\"{role}\",\"nft_id\":{nft_id},\"trustee_address\":\"{trustee}\",\"payout_address\":\"{payout}\"}},\
 \"runtime\":{{\"uptime_batches\":{uptime},\"current_batch\":{cur_batch},\"current_phase\":\"{phase}\",\"pool_id\":{pool_id},\"num_pools\":{num_pools},\"peers\":{peers},\"last_block\":{last_block}}},\
 \"gas\":{{\"balance_supra\":\"{gas_supra}\",\"status\":\"{gas_status}\",\"trading_paused\":{paused},\"paused_since_batch\":{paused_since}}},\
 \"mint\":{{\"has_pending_mint\":{has_pending},\"pending\":{pending}}},\
 \"escrow\":{{\"emm\":{emm},\"kay\":{kay},\"tee\":{tee}}},\
 \"liveness\":{{\"consecutive_inactive\":{live_cons},\"auto_reactivate_attempts\":{live_att},\"auto_reactivate_successes\":{live_suc}}},\
-\"settle\":{{\"submits_total\":{settle_sub},\"aborts_total\":{settle_ab}}},\
-\"burn\":{{\"requested\":{burn_req},\"requested_at_batch\":{burn_req_at}}}\
+\"settle\":{{\"submits_total\":{settle_sub},\"aborts_total\":{settle_ab}}}\
 }}",
         ts = now_unix,
         network = network,
         role = node_role,
         nft_id = nft_id,
         trustee = trustee,
-        benef = beneficiary,
+        payout = payout,
         uptime = uptime_batches,
         cur_batch = current_batch,
         phase = phase_str,
@@ -3157,8 +3143,6 @@ pub(crate) fn build_status_v1_json(
         live_suc = liveness_successes,
         settle_sub = settle_submits_total,
         settle_ab = settle_aborts_total,
-        burn_req = burn_requested,
-        burn_req_at = burn_requested_at_batch,
     )
 }
 
@@ -3171,7 +3155,7 @@ pub(crate) fn build_status_v1_disk_only_json(
     node_role: &str,
     nft_id: u64,
     trustee: &str,
-    beneficiary: &str,
+    payout: &str,
     error: &str,
 ) -> String {
     let now_unix = std::time::SystemTime::now()
@@ -3184,7 +3168,7 @@ pub(crate) fn build_status_v1_disk_only_json(
 \"schema_version\":\"v1\",\
 \"node_running\":false,\
 \"timestamp_unix\":{ts},\
-\"identity\":{{\"network\":\"{network}\",\"node_role\":\"{role}\",\"nft_id\":{nft_id},\"trustee_address\":\"{trustee}\",\"beneficiary_address\":\"{benef}\"}},\
+\"identity\":{{\"network\":\"{network}\",\"node_role\":\"{role}\",\"nft_id\":{nft_id},\"trustee_address\":\"{trustee}\",\"payout_address\":\"{payout}\"}},\
 \"error\":\"{err}\"\
 }}",
         ts = now_unix,
@@ -3192,7 +3176,7 @@ pub(crate) fn build_status_v1_disk_only_json(
         role = node_role,
         nft_id = nft_id,
         trustee = trustee,
-        benef = beneficiary,
+        payout = payout,
         err = escape(error),
     )
 }
@@ -3507,7 +3491,6 @@ mod mr2_tests {
             0, 0, 0,
             42, 1,
             None,
-            false, 0,
         );
         let v = parse(&body);
         for key in [
@@ -3519,23 +3502,10 @@ mod mr2_tests {
         }
         assert_eq!(v["schema_version"], "v1");
         assert_eq!(v["node_running"], true);
-        // Burn-exit (DMKT13): burn section present + defaults to "not requested".
-        assert!(v.get("burn").is_some(), "missing burn section");
-        assert_eq!(v["burn"]["requested"], false);
-        assert_eq!(v["burn"]["requested_at_batch"], 0);
-    }
-
-    #[test]
-    fn t_mr2_12_burn_section_populated_when_requested() {
-        let body = build_status_v1_json(
-            "testnet", "trading", 1, "0x", "0x",
-            0, 0, 0, 0, 1, 0, 0, 0, 0, false, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, None,
-            true, 4242,
-        );
-        let v = parse(&body);
-        assert_eq!(v["burn"]["requested"], true);
-        assert_eq!(v["burn"]["requested_at_batch"], 4242);
+        // DMKT14: burn-request status section removed (no on-chain
+        // burn-request state any more).
+        assert!(v.get("burn").is_none(), "burn section should be gone");
+        assert_eq!(v["identity"]["payout_address"], "0xdef");
     }
 
     #[test]
@@ -3545,7 +3515,6 @@ mod mr2_tests {
                 "testnet", "trading", 1, "0x", "0x",
                 0, 0, u, 0, 1, 0, 0, 0, 0, false, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, None,
-                false, 0,
             );
             let v = parse(&body);
             assert_eq!(v["runtime"]["current_phase"], want);
@@ -3559,7 +3528,6 @@ mod mr2_tests {
                 "testnet", "trading", 1, "0x", "0x",
                 0, 0, 0, 0, 1, 0, 0, 0, u, false, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, None,
-                false, 0,
             );
             let v = parse(&body);
             assert_eq!(v["gas"]["status"], want);
@@ -3572,7 +3540,6 @@ mod mr2_tests {
             "testnet", "trading", 1, "0x", "0x",
             0, 0, 0, 0, 1, 0, 0, 0, 0, false, 0,
             0, 0, 0, 0, 0, 0, 0, 0, None,
-            false, 0,
         );
         let v = parse(&body);
         assert!(v["gas"]["paused_since_batch"].is_null());
@@ -3585,7 +3552,6 @@ mod mr2_tests {
             "testnet", "trading", 1, "0x", "0x",
             0, 100, 0, 0, 1, 0, 0, 0, 2, true, 95,
             0, 0, 0, 0, 0, 0, 0, 0, None,
-            false, 0,
         );
         let v = parse(&body);
         assert_eq!(v["gas"]["trading_paused"], true);
@@ -3598,7 +3564,6 @@ mod mr2_tests {
             "testnet", "trading", 1, "0x", "0x",
             0, 0, 0, 0, 1, 0, 0, 0, 0, false, 0,
             0, 0, 0, 0, 0, 0, 0, 0, None,
-            false, 0,
         );
         let v = parse(&body);
         assert_eq!(v["mint"]["has_pending_mint"], false);
@@ -3618,7 +3583,6 @@ mod mr2_tests {
             "testnet", "trading", 1, "0x", "0x",
             0, 0, 0, 0, 1, 0, 0, 0, 0, false, 0,
             0, 0, 0, 0, 0, 0, 0, 0, Some(pm),
-            false, 0,
         );
         let v = parse(&body);
         assert_eq!(v["mint"]["has_pending_mint"], true);
@@ -3640,7 +3604,6 @@ mod mr2_tests {
             0, 0, 0, 0, 1, 0, 0, 0, 0, false, 0,
             12345, 67890, 11111,
             0, 0, 0, 0, 0, None,
-            false, 0,
         );
         let v = parse(&body);
         assert_eq!(v["escrow"]["emm"], 12345);
@@ -3686,7 +3649,6 @@ mod mr2_tests {
             0, 0, 0, 0, 1, 0, 0,
             421_000_000, 0, false, 0,
             0, 0, 0, 0, 0, 0, 0, 0, None,
-            false, 0,
         );
         let v = parse(&body);
         assert_eq!(v["gas"]["balance_supra"], "4.21");

@@ -676,24 +676,6 @@ impl ChainClient for SupraSetupClient {
         })
     }
 
-    fn get_beneficiary(
-        &self,
-        nft_id: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<String, SetupError>> + Send + '_>> {
-        Box::pin(async move {
-            match self.client
-                .view_raw("nft", "get_beneficiary", vec![], vec![Value::String(nft_id.to_string())])
-                .await
-            {
-                Ok(val) => {
-                    let ben = val.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    Ok(ben)
-                }
-                Err(_) => Ok(String::new()),
-            }
-        })
-    }
-
     fn get_nft_config(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<NftConfigInfo, SetupError>> + Send + '_>> {
@@ -722,27 +704,22 @@ impl ChainClient for SupraSetupClient {
     fn submit_mint(
         &self,
         pubkey: &[u8],
-        beneficiary: &str,
         sponsor: &str,
     ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
         let pubkey_vec = pubkey.to_vec();
-        let ben = beneficiary.to_string();
         let sp = sponsor.to_string();
         Box::pin(async move {
-            let ben_addr = parse_address(&ben)?;
             let sp_addr = parse_address(&sp)?;
-            // Burn-exit rev: mint_pair(trustee, ed25519_pubkey, beneficiary, sponsor)
-            // -- sponsor is the 4th positional arg, immutable post-mint, receives
-            // the time-decayed refund on burn-exit.
+            // DMKT14: mint_trustee_nft(trustee, ed25519_pubkey, sponsor).
+            // The beneficiary arg is gone; sponsor is immutable post-mint and
+            // receives the time-decayed refund on burn-exit.
             let args = vec![
                 bcs::to_bytes(&pubkey_vec)
-                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
-                bcs::to_bytes(&ben_addr)
                     .map_err(|e| SetupError::ChainError(e.to_string()))?,
                 bcs::to_bytes(&sp_addr)
                     .map_err(|e| SetupError::ChainError(e.to_string()))?,
             ];
-            self.submit_entry_function("nft", "mint_pair", args).await
+            self.submit_entry_function("nft", "mint_trustee_nft", args).await
         })
     }
 
@@ -993,16 +970,21 @@ impl ChainClient for SupraSetupClient {
         })
     }
 
-    fn submit_burn_to_beneficiary(
+    fn submit_burn_for_profit(
         &self,
         amount: u64,
+        recipient: String,
     ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
         Box::pin(async move {
+            // DMKT14: burn_for_profit(burn_amount, recipient).
+            let recipient_addr = parse_address(&recipient)?;
             let args = vec![
                 bcs::to_bytes(&amount)
                     .map_err(|e| SetupError::ChainError(e.to_string()))?,
+                bcs::to_bytes(&recipient_addr)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
             ];
-            self.submit_entry_function("tokens", "burn_to_beneficiary", args).await
+            self.submit_entry_function("tokens", "burn_for_profit", args).await
         })
     }
 
@@ -1059,10 +1041,9 @@ impl ChainClient for SupraSetupClient {
 
     // ------------------------------------------------------------------
     // MR3: withdrawal entry functions (SUPRA-only exits).
-    // All six take only nft_id (beneficiary signer is the configured
-    // signing key). Self-funded operators where trustee == beneficiary
-    // can call these directly with the node keystore; otherwise the
-    // contract returns E_NOT_BENEFICIARY.
+    // DMKT14: these are trustee-signed (the node's signing key IS the
+    // trustee). The `recipient` (off-chain payout address) is passed as
+    // an explicit arg on the *_as_supra calls; SUPRA is sent there.
     // ------------------------------------------------------------------
 
     fn submit_request_rushed_withdrawal(
@@ -1090,10 +1071,17 @@ impl ChainClient for SupraSetupClient {
     fn submit_rushed_withdrawal_as_supra(
         &self,
         nft_id: u64,
+        recipient: String,
     ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
         Box::pin(async move {
-            let args = vec![bcs::to_bytes(&nft_id)
-                .map_err(|e| SetupError::ChainError(e.to_string()))?];
+            // DMKT14: rushed_withdrawal_as_supra(nft_id, recipient).
+            let recipient_addr = parse_address(&recipient)?;
+            let args = vec![
+                bcs::to_bytes(&nft_id)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+                bcs::to_bytes(&recipient_addr)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+            ];
             self.submit_entry_function("tokens", "rushed_withdrawal_as_supra", args).await
         })
     }
@@ -1123,11 +1111,37 @@ impl ChainClient for SupraSetupClient {
     fn submit_claim_all_as_supra(
         &self,
         nft_id: u64,
+        recipient: String,
     ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
         Box::pin(async move {
-            let args = vec![bcs::to_bytes(&nft_id)
-                .map_err(|e| SetupError::ChainError(e.to_string()))?];
+            // DMKT14: claim_all_as_supra(nft_id, recipient).
+            let recipient_addr = parse_address(&recipient)?;
+            let args = vec![
+                bcs::to_bytes(&nft_id)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+                bcs::to_bytes(&recipient_addr)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+            ];
             self.submit_entry_function("tokens", "claim_all_as_supra", args).await
+        })
+    }
+
+    fn submit_burn_trustee_nft(
+        &self,
+        nft_id: u64,
+        recipient: String,
+    ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            // DMKT14: exits::burn_trustee_nft(nft_id, recipient). Single
+            // trustee-signed burn-exit (replaces request/execute_burn_pair).
+            let recipient_addr = parse_address(&recipient)?;
+            let args = vec![
+                bcs::to_bytes(&nft_id)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+                bcs::to_bytes(&recipient_addr)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
+            ];
+            self.submit_entry_function("exits", "burn_trustee_nft", args).await
         })
     }
 }

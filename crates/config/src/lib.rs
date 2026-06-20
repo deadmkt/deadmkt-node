@@ -74,7 +74,10 @@ pub struct NodeConfig {
     pub rpc_urls: Vec<String>,
     pub nft_id: u64,
     pub trustee_address: String,
-    pub beneficiary_address: String,
+    /// Off-chain payout address: where exit/profit/withdrawal SUPRA is sent
+    /// (passed as the `recipient` arg on every exit/withdraw/profit call).
+    /// DMKT14 removed the on-chain beneficiary NFT; this replaces it.
+    pub payout_address: String,
     pub sponsor_address: String,
     pub contracts: ContractAddresses,
     pub bootstrap_peers: Vec<String>,
@@ -164,7 +167,7 @@ impl NodeConfig {
         network: Network,
         nft_id: u64,
         trustee_address: String,
-        beneficiary_address: String,
+        payout_address: String,
         sponsor_address: String,
         markets: Vec<String>,
     ) -> Self {
@@ -180,7 +183,7 @@ impl NodeConfig {
             network,
             nft_id,
             trustee_address,
-            beneficiary_address,
+            payout_address,
             sponsor_address,
             contracts,
             strategy_auth_token: hex::encode(token_bytes),
@@ -370,7 +373,7 @@ mod tests {
             rpc_urls: vec!["https://rpc-testnet.supra.com".into()],
             nft_id: 42,
             trustee_address: "0xTRUSTEE".into(),
-            beneficiary_address: "0xBENEF".into(),
+            payout_address: "0xBENEF".into(),
             sponsor_address: "0xSPONSOR".into(),
             contracts: ContractAddresses {
                 settlement: "0xS".into(),
@@ -437,7 +440,7 @@ mod tests {
             "rpc_urls": ["https://rpc-testnet.supra.com"],
             "nft_id": 42,
             "trustee_address": "0xTRUSTEE",
-            "beneficiary_address": "0xBENEF",
+            "payout_address": "0xBENEF",
             "sponsor_address": "0xSPONSOR",
             "contracts": {
                 "settlement": "0xS", "escrow": "0xE",
@@ -518,7 +521,7 @@ mod tests {
         assert_eq!(config.network, reloaded.network);
         assert_eq!(config.nft_id, reloaded.nft_id);
         assert_eq!(config.trustee_address, reloaded.trustee_address);
-        assert_eq!(config.beneficiary_address, reloaded.beneficiary_address);
+        assert_eq!(config.payout_address, reloaded.payout_address);
         assert_eq!(config.sponsor_address, reloaded.sponsor_address);
         assert_eq!(config.markets, reloaded.markets);
         assert_eq!(config.strategy_auth_token, reloaded.strategy_auth_token);

@@ -311,21 +311,19 @@ pub enum ChainEvent {
     },
 
     // Burn-exit events (from exits.move):
-    BurnRequested {
-        nft_id: u64,
-        beneficiary: String,
-        requested_at_batch: u64,
-    },
+    // DMKT14: BurnRequested removed (single-call trustee-signed burn, no
+    // request step). BurnExecuted drops `beneficiary`, renames
+    // supra_to_beneficiary -> supra_to_recipient, adds `recipient`.
     BurnExecuted {
         nft_id: u64,
         executor: String,
         sponsor: String,
-        beneficiary: String,
+        recipient: String,
         refund_supra: u64,
         treasury_before: u64,
         treasury_after: u64,
         active_nfts_before_burn: u64,
-        supra_to_beneficiary: u64,
+        supra_to_recipient: u64,
         is_fallback: bool,
         is_last_nft: bool,
         nominal_refund: u64,
@@ -511,7 +509,8 @@ impl ChainEvent {
             Ok(ChainEvent::PoolAdjustmentCancelled)
 
         // ── NFT lifecycle (burn-exit rev) ──────────────────────────
-        } else if type_str.contains("NFTPairMinted") {
+        // DMKT14: event renamed NFTPairMinted -> TrusteeNftMinted.
+        } else if type_str.contains("TrusteeNftMinted") {
             Ok(ChainEvent::NftPairMinted {
                 nft_id: data.get("nft_id").and_then(|v| v.as_str())
                     .unwrap_or("0").parse().unwrap_or(0),
@@ -525,15 +524,8 @@ impl ChainEvent {
             })
 
         // ── Burn-exit events (from exits.move) ─────────────────────
-        } else if type_str.contains("BurnRequested") {
-            Ok(ChainEvent::BurnRequested {
-                nft_id: data.get("nft_id").and_then(|v| v.as_str())
-                    .unwrap_or("0").parse().unwrap_or(0),
-                beneficiary: data.get("beneficiary").and_then(|v| v.as_str())
-                    .unwrap_or("").to_string(),
-                requested_at_batch: data.get("requested_at_batch").and_then(|v| v.as_str())
-                    .unwrap_or("0").parse().unwrap_or(0),
-            })
+        // DMKT14: BurnRequested removed; BurnExecuted carries `recipient`
+        // + `supra_to_recipient` (was beneficiary / supra_to_beneficiary).
         } else if type_str.contains("BurnExecuted") {
             Ok(ChainEvent::BurnExecuted {
                 nft_id: data.get("nft_id").and_then(|v| v.as_str())
@@ -542,7 +534,7 @@ impl ChainEvent {
                     .unwrap_or("").to_string(),
                 sponsor: data.get("sponsor").and_then(|v| v.as_str())
                     .unwrap_or("").to_string(),
-                beneficiary: data.get("beneficiary").and_then(|v| v.as_str())
+                recipient: data.get("recipient").and_then(|v| v.as_str())
                     .unwrap_or("").to_string(),
                 refund_supra: data.get("refund_supra").and_then(|v| v.as_str())
                     .unwrap_or("0").parse().unwrap_or(0),
@@ -552,7 +544,7 @@ impl ChainEvent {
                     .unwrap_or("0").parse().unwrap_or(0),
                 active_nfts_before_burn: data.get("active_nfts_before_burn").and_then(|v| v.as_str())
                     .unwrap_or("0").parse().unwrap_or(0),
-                supra_to_beneficiary: data.get("supra_to_beneficiary").and_then(|v| v.as_str())
+                supra_to_recipient: data.get("supra_to_recipient").and_then(|v| v.as_str())
                     .unwrap_or("0").parse().unwrap_or(0),
                 is_fallback: data.get("is_fallback").and_then(|v| v.as_bool()).unwrap_or(false),
                 is_last_nft: data.get("is_last_nft").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -741,15 +733,14 @@ mod tests {
     // (bond mechanism replaced by mint_fee -> ops_treasury -> time-decay
     // refund on burn-exit). See planning/specs/individual-nft-burn-exit.md.
 
-    // T_TYPES_07b (new): NFTPairMinted event roundtrip with sponsor fields.
+    // T_TYPES_07b (new): TrusteeNftMinted event roundtrip with sponsor fields.
     #[test]
     fn test_nft_pair_minted_from_json() {
         let json = json!({
-            "type": "0xDEADMKT::nft::NFTPairMinted",
+            "type": "0xDEADMKT::nft::TrusteeNftMinted",
             "data": {
                 "nft_id": "42",
                 "trustee": "0xT",
-                "beneficiary": "0xB",
                 "sponsor": "0xS",
                 "ed25519_pubkey": "0xABCD",
                 "mint_fee_paid": "100000000000",
@@ -769,30 +760,10 @@ mod tests {
         }
     }
 
-    // T_TYPES_07c: BurnRequested event roundtrip.
-    #[test]
-    fn test_burn_requested_from_json() {
-        let json = json!({
-            "type": "0xDEADMKT::exits::BurnRequested",
-            "data": {
-                "nft_id": "5",
-                "beneficiary": "0xB",
-                "requested_at_batch": "999",
-                "timestamp": "2000"
-            }
-        });
-        let ev = ChainEvent::from_json(&json).unwrap();
-        match ev {
-            ChainEvent::BurnRequested { nft_id, beneficiary, requested_at_batch } => {
-                assert_eq!(nft_id, 5);
-                assert_eq!(beneficiary, "0xB");
-                assert_eq!(requested_at_batch, 999);
-            }
-            other => panic!("expected BurnRequested, got {:?}", other),
-        }
-    }
+    // T_TYPES_07c: BurnRequested test removed (event deleted in DMKT14;
+    // burn-exit is now a single trustee-signed call with no request step).
 
-    // T_TYPES_07d: BurnExecuted event roundtrip with all 12 fields.
+    // T_TYPES_07d: BurnExecuted event roundtrip (DMKT14 fields).
     #[test]
     fn test_burn_executed_from_json() {
         let json = json!({
@@ -801,12 +772,12 @@ mod tests {
                 "nft_id": "5",
                 "executor": "0xE",
                 "sponsor": "0xS",
-                "beneficiary": "0xB",
+                "recipient": "0xR",
                 "refund_supra": "97500000000",
                 "treasury_before": "500000000000",
                 "treasury_after": "402500000000",
                 "active_nfts_before_burn": "5",
-                "supra_to_beneficiary": "0",
+                "supra_to_recipient": "0",
                 "is_fallback": false,
                 "is_last_nft": false,
                 "nominal_refund": "97500000000",

@@ -3,7 +3,7 @@
 // Background task that processes token management actions from the strategy
 // WebSocket. Runs continuously, independent of the batch commit cycle.
 //
-// Actions: Mint, ClaimMint, BurnFromEscrow, BurnToBeneficiary, Lock, Unlock, DonateDust
+// Actions: Mint, ClaimMint, BurnFromEscrow, BurnForProfit, Lock, Unlock, DonateDust
 //
 // DMKT11: Auto-deposit removed. Tokens never leave escrow to wallet.
 // claim_mint deposits directly to escrow (C1). lock/unlock operate
@@ -15,13 +15,17 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Spawn a background tokio task that processes token actions.
+///
+/// `payout_address` is the off-chain recipient for profit-takeout burns
+/// (DMKT14 `burn_for_profit`); the node always signs as the trustee.
 pub fn spawn_token_worker(
     client: Arc<dyn ChainClient>,
     rx: mpsc::Receiver<StrategyAction>,
     event_tx: mpsc::Sender<StrategyEvent>,
     tx_lock: Arc<tokio::sync::Mutex<()>>,
+    payout_address: String,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(token_worker_loop(client, rx, event_tx, tx_lock))
+    tokio::spawn(token_worker_loop(client, rx, event_tx, tx_lock, payout_address))
 }
 
 /// Send a TokenActionResult event. Best-effort — if the channel is full, drop it.
@@ -41,6 +45,7 @@ async fn token_worker_loop(
     mut rx: mpsc::Receiver<StrategyAction>,
     event_tx: mpsc::Sender<StrategyEvent>,
     tx_lock: Arc<tokio::sync::Mutex<()>>,
+    payout_address: String,
 ) {
     println!("[token_worker] started — listening for token actions");
 
@@ -104,20 +109,20 @@ async fn token_worker_loop(
                 }
             }
 
-            StrategyAction::BurnToBeneficiary { amount } => {
-                println!("[token_worker] burn_to_beneficiary({})", amount);
-                match client.submit_burn_to_beneficiary(amount).await {
+            StrategyAction::BurnForProfit { amount } => {
+                println!("[token_worker] burn_for_profit({}, recipient={})", amount, payout_address);
+                match client.submit_burn_for_profit(amount, payout_address.clone()).await {
                     Ok(r) if r.success => {
-                        println!("[token_worker] burn_to_beneficiary OK (gas={})", r.gas_used);
-                        notify(&event_tx, "burn_to_beneficiary", true, format!("gas={}", r.gas_used)).await;
+                        println!("[token_worker] burn_for_profit OK (gas={})", r.gas_used);
+                        notify(&event_tx, "burn_for_profit", true, format!("gas={}", r.gas_used)).await;
                     }
                     Ok(r) => {
-                        eprintln!("[token_worker] burn_to_beneficiary FAILED: {}", r.vm_status);
-                        notify(&event_tx, "burn_to_beneficiary", false, r.vm_status).await;
+                        eprintln!("[token_worker] burn_for_profit FAILED: {}", r.vm_status);
+                        notify(&event_tx, "burn_for_profit", false, r.vm_status).await;
                     }
                     Err(e) => {
-                        eprintln!("[token_worker] burn_to_beneficiary ERROR: {}", e);
-                        notify(&event_tx, "burn_to_beneficiary", false, e.to_string()).await;
+                        eprintln!("[token_worker] burn_for_profit ERROR: {}", e);
+                        notify(&event_tx, "burn_for_profit", false, e.to_string()).await;
                     }
                 }
             }

@@ -34,7 +34,9 @@ pub struct SetupConfig {
     pub network: String,
 
     /// Required for fresh setup. Hex-prefixed account address.
-    pub beneficiary_address: String,
+    /// DMKT14: off-chain payout address (where exit/profit/withdrawal
+    /// SUPRA is sent); replaces the removed on-chain beneficiary.
+    pub payout_address: String,
 
     /// Burn-exit revision: sponsor address (capital provider; receives
     /// the time-decayed refund on burn-exit). Optional in config: defaults
@@ -157,7 +159,7 @@ pub struct SetupResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trustee_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub beneficiary_address: Option<String>,
+    pub payout_address: Option<String>,
     /// Burn-exit rev: sponsor address that was used at mint. Mirrors
     /// what the contract stored in registry.sponsors[nft_id].
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,7 +186,7 @@ impl SetupResult {
             mode: SetupMode::Fresh,
             nft_id: None,
             trustee_address: None,
-            beneficiary_address: None,
+            payout_address: None,
             sponsor_address: None,
             network: network.to_string(),
             node_role: node_role.to_string(),
@@ -318,7 +320,7 @@ pub fn validate_withdrawal_rules(rules: &WithdrawalRules) -> Result<(), SetupErr
 #[derive(Debug, Clone)]
 pub struct ValidatedSetupConfig {
     pub network: deadmkt_config::Network,
-    pub beneficiary_address: String, // normalised (lowercase, trimmed)
+    pub payout_address: String, // normalised (lowercase, trimmed)
     /// Burn-exit rev: normalised sponsor address, or None if not provided
     /// in the config. None means "default to trustee address" at mint time.
     pub sponsor_address: Option<String>,
@@ -331,7 +333,7 @@ pub struct ValidatedSetupConfig {
 /// Common-field validation. Pure -- no IO.
 fn validate_common(cfg: &SetupConfig) -> Result<ValidatedSetupConfig, SetupError> {
     let network = validate_network(&cfg.network)?;
-    let beneficiary_address = validate_address(&cfg.beneficiary_address)?;
+    let payout_address = validate_address(&cfg.payout_address)?;
     let bootstrap_only = validate_node_role(&cfg.node_role)?;
     let sponsor_address = match &cfg.sponsor_address {
         Some(s) if !s.trim().is_empty() => Some(validate_address(s)?),
@@ -341,7 +343,7 @@ fn validate_common(cfg: &SetupConfig) -> Result<ValidatedSetupConfig, SetupError
     validate_withdrawal_rules(&cfg.withdrawal_rules)?;
     Ok(ValidatedSetupConfig {
         network,
-        beneficiary_address,
+        payout_address,
         sponsor_address,
         bootstrap_only,
         mint_amounts: cfg.mint_amounts.clone(),
@@ -604,10 +606,16 @@ pub async fn run_setup_noninteractive_fresh(
 /// MR1c: restore-from-backup entry point. No setup.json -- the operator
 /// dropped their backed-up `keystore.json` into the data directory and
 /// ran the node. We prompt for the keystore password, unlock the keys,
-/// query the chain for the trustee's NFT + beneficiary + escrow state,
-/// and reconstruct `config.json` from network defaults plus the chain's
-/// answers. **The trustee's only backup responsibility is keystore.json
-/// + password.** Everything else is recoverable from chain state.
+/// query the chain for the trustee's NFT + escrow state, and reconstruct
+/// `config.json` from network defaults plus the chain's answers. **The
+/// trustee's only backup responsibility is keystore.json + password.**
+/// Everything else is recoverable from chain state.
+///
+/// DMKT14: the payout address is no longer on-chain (the beneficiary NFT
+/// was removed), so it cannot be read back during restore. We default
+/// `payout_address` to the trustee's own address and emit a warning so
+/// the operator knows to edit config.json if they want exits/profit sent
+/// elsewhere.
 ///
 /// Returns a SetupResult tagged `mode: restore`. The caller writes JSON
 /// to stdout and exits; the operator runs `deadmkt-node` again to begin
@@ -620,8 +628,7 @@ pub async fn run_setup_noninteractive_fresh(
 ///   - NFT exists, NOT registered → write config + warning (operator
 ///     should run interactive setup / supply a setup.json)
 ///   - No NFT for this address → error: this keystore has never minted;
-///     can't restore -- need beneficiary address (use MR1a fresh setup
-///     instead)
+///     can't restore -- use MR1a fresh setup instead
 ///   - Heartbeat reaped → write config + warning suggesting
 ///     `deadmkt-node reactivate`. The node's own #13b liveness check
 ///     will also attempt auto-reactivate on startup.
@@ -655,19 +662,25 @@ pub async fn run_setup_noninteractive_restore(
     chain.set_signer(secret.as_bytes(), public.as_bytes(), &address);
 
     // 3. Chain state verification -------------------------------------------
+    // DMKT14: payout address is no longer on-chain, so restore defaults it
+    // to the trustee's own address (operator can edit config.json to point
+    // exits/profit elsewhere).
     let nft_id = match crate::check_existing_nft(chain, &address).await {
-        Ok(crate::ExistingNft::Found { nft_id, beneficiary }) => {
-            result.beneficiary_address = Some(beneficiary.clone());
+        Ok(crate::ExistingNft::Found { nft_id }) => {
+            result.payout_address = Some(address.clone());
+            result.warnings.push(
+                "DMKT14: payout address is no longer stored on-chain. Defaulted payout_address to the trustee's own address; edit config.json if you want exit/profit SUPRA sent elsewhere.".to_string(),
+            );
             eprintln!(
-                "[restore] On-chain: NFT #{} owned, beneficiary {}",
-                nft_id, beneficiary
+                "[restore] On-chain: NFT #{} owned. Payout defaulted to trustee address {}",
+                nft_id, address
             );
             nft_id
         }
         Ok(crate::ExistingNft::NotFound) => {
             return result.fail(
                 "check_existing_nft",
-                "no NFT on-chain for this keystore -- a restore needs an already-minted NFT (beneficiary is read from chain). Use MR1a fresh setup with a setup.json to mint a new NFT against a chosen beneficiary."
+                "no NFT on-chain for this keystore -- a restore needs an already-minted NFT. Use MR1a fresh setup with a setup.json to mint a new NFT."
             );
         }
         Err(e) => return result.fail("check_existing_nft", e),
@@ -712,10 +725,11 @@ pub async fn run_setup_noninteractive_restore(
     }
 
     // 5. Reconstruct config from network defaults ---------------------------
-    let beneficiary_address = result.beneficiary_address.clone().unwrap_or_default();
+    // DMKT14: payout defaults to the trustee's own address (set above).
+    let payout_address = result.payout_address.clone().unwrap_or_else(|| address.clone());
     let v = ValidatedSetupConfig {
         network: network.clone(),
-        beneficiary_address: beneficiary_address.clone(),
+        payout_address: payout_address.clone(),
         // Restore-from-backup path: sponsor address isn't reconstructable
         // from chain state for the restore use case (we'd need to query
         // nft::get_sponsor(nft_id), which the restore happy path could do
@@ -797,7 +811,7 @@ fn init_result(v: &ValidatedSetupConfig, mode: SetupMode) -> SetupResult {
     let node_role = if v.bootstrap_only { "bootstrap" } else { "trading" };
     let mut r = SetupResult::fresh_in_progress(network, node_role);
     r.mode = mode;
-    r.beneficiary_address = Some(v.beneficiary_address.clone());
+    r.payout_address = Some(v.payout_address.clone());
     r
 }
 
@@ -852,7 +866,7 @@ async fn run_setup_after_keystore(
             // three-address pattern set sponsor_address in setup.json.
             let sponsor = v.sponsor_address.clone().unwrap_or_else(|| address.clone());
             match crate::mint_nft_pair(
-                &mut io, chain, public.as_bytes(), &v.beneficiary_address, &sponsor, &address,
+                &mut io, chain, public.as_bytes(), &sponsor, &address,
             ).await {
                 Ok(id) => {
                     result.steps_performed.push("mint_nft".into());
@@ -965,7 +979,7 @@ pub fn build_node_config_from_chain(
         rpc_urls,
         nft_id,
         trustee_address: trustee_address.to_string(),
-        beneficiary_address: v.beneficiary_address.clone(),
+        payout_address: v.payout_address.clone(),
         sponsor_address: String::new(),
         contracts,
         bootstrap_peers,
@@ -1031,13 +1045,13 @@ mod tests {
     fn t_mr1a_01_setup_config_minimal_parses() {
         // Only required fields supplied. Everything else takes defaults.
         let json = r#"{
-            "beneficiary_address": "0x1234567890abcdef",
+            "payout_address": "0x1234567890abcdef",
             "keystore_password": "verysecret"
         }"#;
         let cfg: SetupConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.network, "testnet");
         assert_eq!(cfg.node_role, "trading");
-        assert_eq!(cfg.beneficiary_address, "0x1234567890abcdef");
+        assert_eq!(cfg.payout_address, "0x1234567890abcdef");
         assert_eq!(cfg.keystore_password.as_deref(), Some("verysecret"));
         assert_eq!(cfg.mint_amounts.emm, 50000);
         assert_eq!(cfg.mint_amounts.kay, 50000);
@@ -1052,7 +1066,7 @@ mod tests {
     fn t_mr1a_02_setup_config_full_parses() {
         let json = r#"{
             "network": "mainnet",
-            "beneficiary_address": "0xabc1234567",
+            "payout_address": "0xabc1234567",
             "node_role": "bootstrap",
             "keystore_password": "abcdefgh",
             "mint_amounts": { "emm": 1, "kay": 2, "tee": 3 },
@@ -1072,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn t_mr1a_03_setup_config_missing_beneficiary_fails() {
+    fn t_mr1a_03_setup_config_missing_payout_fails() {
         let json = r#"{ "keystore_password": "verysecret" }"#;
         let r: Result<SetupConfig, _> = serde_json::from_str(json);
         assert!(r.is_err());
@@ -1154,7 +1168,7 @@ mod tests {
     fn t_mr1a_70_validate_for_fresh_setup_happy_path() {
         let cfg = SetupConfig {
             network: "testnet".into(),
-            beneficiary_address: "0xABCDef0123".into(),
+            payout_address: "0xABCDef0123".into(),
             sponsor_address: None,
             node_role: "trading".into(),
             keystore_password: Some("strongpass".into()),
@@ -1164,7 +1178,7 @@ mod tests {
         };
         let (v, password) = validate_for_fresh_setup(&cfg).unwrap();
         assert_eq!(v.network, deadmkt_config::Network::Testnet);
-        assert_eq!(v.beneficiary_address, "0xabcdef0123"); // lowercased
+        assert_eq!(v.payout_address, "0xabcdef0123"); // lowercased
         assert!(!v.bootstrap_only);
         assert_eq!(password, "strongpass");
     }
@@ -1173,7 +1187,7 @@ mod tests {
     fn t_mr1a_71_validate_for_fresh_setup_requires_password() {
         let cfg = SetupConfig {
             network: "testnet".into(),
-            beneficiary_address: "0xABCDef0123".into(),
+            payout_address: "0xABCDef0123".into(),
             sponsor_address: None,
             node_role: "trading".into(),
             keystore_password: None, // missing -> MR1a should reject
@@ -1192,7 +1206,7 @@ mod tests {
     fn t_mr1b_10_validate_for_llm_assisted_happy_path() {
         let cfg = SetupConfig {
             network: "testnet".into(),
-            beneficiary_address: "0xABCDef0123".into(),
+            payout_address: "0xABCDef0123".into(),
             sponsor_address: None,
             node_role: "trading".into(),
             keystore_password: None, // LLM safety: no password in config
@@ -1202,14 +1216,14 @@ mod tests {
         };
         let v = validate_for_llm_assisted(&cfg).unwrap();
         assert_eq!(v.network, deadmkt_config::Network::Testnet);
-        assert_eq!(v.beneficiary_address, "0xabcdef0123");
+        assert_eq!(v.payout_address, "0xabcdef0123");
     }
 
     #[test]
     fn t_mr1b_11_validate_for_llm_assisted_rejects_password_in_config() {
         let cfg = SetupConfig {
             network: "testnet".into(),
-            beneficiary_address: "0xABCDef0123".into(),
+            payout_address: "0xABCDef0123".into(),
             sponsor_address: None,
             node_role: "trading".into(),
             keystore_password: Some("oops".into()), // present -> rejected
@@ -1257,7 +1271,7 @@ mod tests {
     fn t_mr1c_10_build_node_config_from_chain_round_trips_fields() {
         let v = ValidatedSetupConfig {
             network: deadmkt_config::Network::Testnet,
-            beneficiary_address: "0xbeef".into(),
+            payout_address: "0xbeef".into(),
             sponsor_address: None,
             bootstrap_only: false,
             mint_amounts: MintAmounts::default(),
@@ -1270,7 +1284,7 @@ mod tests {
         let cfg = build_node_config_from_chain(&v, 42, "0xfeedface");
         assert_eq!(cfg.nft_id, 42);
         assert_eq!(cfg.trustee_address, "0xfeedface");
-        assert_eq!(cfg.beneficiary_address, "0xbeef");
+        assert_eq!(cfg.payout_address, "0xbeef");
         assert_eq!(cfg.network, deadmkt_config::Network::Testnet);
         assert_eq!(cfg.contracts.settlement, "0x7bbf47b7a9d5a94cd9aaccf5039dcd34647e521615db47a1d5b2141ccf00a55f");
         assert!(cfg.rpc_urls[0].contains("rpc-testnet"));
@@ -1342,10 +1356,10 @@ mod tests {
         let path = tmp.path().join("setup.json");
         std::fs::write(
             &path,
-            r#"{ "beneficiary_address": "0x1234567890", "keystore_password": "abcdefgh" }"#,
+            r#"{ "payout_address": "0x1234567890", "keystore_password": "abcdefgh" }"#,
         ).unwrap();
         let cfg = load_setup_config(&path).unwrap();
-        assert_eq!(cfg.beneficiary_address, "0x1234567890");
+        assert_eq!(cfg.payout_address, "0x1234567890");
     }
 
     #[test]
