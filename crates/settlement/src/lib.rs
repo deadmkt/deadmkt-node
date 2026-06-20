@@ -385,10 +385,8 @@ pub fn signing_prefix() -> [u8; 32] {
     prefix
 }
 
-/// Build and sign a generic entry function transaction.
-/// Reusable for deposit, settle_match, or any entry function call.
-pub fn build_and_sign_entry_function(
-    signing_key: &SigningKey,
+/// Construct a RawTransaction for an entry-function call.
+fn build_raw_tx(
     sender_addr: AccountAddress,
     contract_addr: AccountAddress,
     module_name: &str,
@@ -399,8 +397,8 @@ pub fn build_and_sign_entry_function(
     chain_id: u8,
     max_gas: u64,
     gas_price: u64,
-) -> Result<Vec<u8>, SettlementError> {
-    let raw_tx = RawTransaction {
+) -> RawTransaction {
+    RawTransaction {
         sender: sender_addr,
         sequence_number,
         payload: TransactionPayload::EntryFunction(EntryFunction {
@@ -416,27 +414,62 @@ pub fn build_and_sign_entry_function(
         gas_unit_price: gas_price,
         expiration_timestamp_secs: expiration_secs,
         chain_id,
+    }
+}
+
+/// BCS-encode a RawTransaction as a SignedTransaction. When `sign` is true the
+/// authenticator carries a real Ed25519 signature over
+/// (signing_prefix || BCS(raw_tx)); when false it carries a zeroed 64-byte
+/// signature (Supra's simulate endpoint rejects valid signatures).
+fn encode_signed_tx(
+    raw_tx: RawTransaction,
+    signing_key: &SigningKey,
+    sign: bool,
+) -> Result<Vec<u8>, SettlementError> {
+    let signature = if sign {
+        let raw_tx_bytes = bcs::to_bytes(&raw_tx)
+            .map_err(|e| SettlementError::BcsError(e.to_string()))?;
+        let prefix = signing_prefix();
+        let mut signing_msg = Vec::with_capacity(32 + raw_tx_bytes.len());
+        signing_msg.extend_from_slice(&prefix);
+        signing_msg.extend_from_slice(&raw_tx_bytes);
+        signing_key.sign(&signing_msg).to_bytes().to_vec()
+    } else {
+        vec![0u8; 64]
     };
-
-    let raw_tx_bytes = bcs::to_bytes(&raw_tx)
-        .map_err(|e| SettlementError::BcsError(e.to_string()))?;
-
-    let prefix = signing_prefix();
-    let mut signing_msg = Vec::with_capacity(32 + raw_tx_bytes.len());
-    signing_msg.extend_from_slice(&prefix);
-    signing_msg.extend_from_slice(&raw_tx_bytes);
-    let signature = signing_key.sign(&signing_msg);
 
     let signed_tx = SignedTransaction {
         raw_txn: raw_tx,
         authenticator: TransactionAuthenticator::Ed25519(Ed25519Authenticator {
             public_key: signing_key.verifying_key().to_bytes().to_vec(),
-            signature: signature.to_bytes().to_vec(),
+            signature,
         }),
     };
 
     bcs::to_bytes(&signed_tx)
         .map_err(|e| SettlementError::BcsError(e.to_string()))
+}
+
+/// Build and sign a generic entry function transaction.
+/// Reusable for deposit, settle_match, or any entry function call.
+pub fn build_and_sign_entry_function(
+    signing_key: &SigningKey,
+    sender_addr: AccountAddress,
+    contract_addr: AccountAddress,
+    module_name: &str,
+    function_name: &str,
+    args: Vec<Vec<u8>>,
+    sequence_number: u64,
+    expiration_secs: u64,
+    chain_id: u8,
+    max_gas: u64,
+    gas_price: u64,
+) -> Result<Vec<u8>, SettlementError> {
+    let raw_tx = build_raw_tx(
+        sender_addr, contract_addr, module_name, function_name, args,
+        sequence_number, expiration_secs, chain_id, max_gas, gas_price,
+    );
+    encode_signed_tx(raw_tx, signing_key, true)
 }
 
 /// Build the same transaction but with zeroed signature for simulation.
@@ -454,34 +487,11 @@ pub fn build_simulation_entry_function(
     max_gas: u64,
     gas_price: u64,
 ) -> Result<Vec<u8>, SettlementError> {
-    let raw_tx = RawTransaction {
-        sender: sender_addr,
-        sequence_number,
-        payload: TransactionPayload::EntryFunction(EntryFunction {
-            module: ModuleId {
-                address: contract_addr,
-                name: module_name.to_string(),
-            },
-            function: function_name.to_string(),
-            ty_args: vec![],
-            args,
-        }),
-        max_gas_amount: max_gas,
-        gas_unit_price: gas_price,
-        expiration_timestamp_secs: expiration_secs,
-        chain_id,
-    };
-
-    let signed_tx = SignedTransaction {
-        raw_txn: raw_tx,
-        authenticator: TransactionAuthenticator::Ed25519(Ed25519Authenticator {
-            public_key: signing_key.verifying_key().to_bytes().to_vec(),
-            signature: vec![0u8; 64], // zeroed signature for simulation
-        }),
-    };
-
-    bcs::to_bytes(&signed_tx)
-        .map_err(|e| SettlementError::BcsError(e.to_string()))
+    let raw_tx = build_raw_tx(
+        sender_addr, contract_addr, module_name, function_name, args,
+        sequence_number, expiration_secs, chain_id, max_gas, gas_price,
+    );
+    encode_signed_tx(raw_tx, signing_key, false)
 }
 
 // =========================================================================
@@ -507,14 +517,16 @@ impl SettlementSubmitter {
         sender_addr: &str,
         chain_id: u8,
     ) -> Result<Self, SettlementError> {
+        const DEFAULT_MAX_GAS: u64 = 200;
+        const DEFAULT_GAS_PRICE: u64 = 100_000;
         Ok(Self {
             client,
             signing_key,
             contract_addr: parse_address(contract_addr)?,
             sender_addr: parse_address(sender_addr)?,
             chain_id,
-            max_gas: 200,
-            gas_price: 100_000,
+            max_gas: DEFAULT_MAX_GAS,
+            gas_price: DEFAULT_GAS_PRICE,
         })
     }
 
@@ -550,46 +562,12 @@ impl SettlementSubmitter {
         sequence_number: u64,
         expiration_secs: u64,
     ) -> Result<Vec<u8>, SettlementError> {
-        let args = build_settle_args(m)?;
-
-        let raw_tx = RawTransaction {
-            sender: self.sender_addr,
-            sequence_number,
-            payload: TransactionPayload::EntryFunction(EntryFunction {
-                module: ModuleId {
-                    address: self.contract_addr,
-                    name: "settlement".to_string(),
-                },
-                function: "settle_match".to_string(),
-                ty_args: vec![],
-                args,
-            }),
-            max_gas_amount: self.max_gas,
-            gas_unit_price: self.gas_price,
-            expiration_timestamp_secs: expiration_secs,
-            chain_id: self.chain_id,
-        };
-
-        let raw_tx_bytes = bcs::to_bytes(&raw_tx)
-            .map_err(|e| SettlementError::BcsError(e.to_string()))?;
-
-        // Sign: prefix || raw_tx_bytes
-        let prefix = signing_prefix();
-        let mut signing_msg = Vec::with_capacity(32 + raw_tx_bytes.len());
-        signing_msg.extend_from_slice(&prefix);
-        signing_msg.extend_from_slice(&raw_tx_bytes);
-        let signature = self.signing_key.sign(&signing_msg);
-
-        let signed_tx = SignedTransaction {
-            raw_txn: raw_tx,
-            authenticator: TransactionAuthenticator::Ed25519(Ed25519Authenticator {
-                public_key: self.signing_key.verifying_key().to_bytes().to_vec(),
-                signature: signature.to_bytes().to_vec(),
-            }),
-        };
-
-        bcs::to_bytes(&signed_tx)
-            .map_err(|e| SettlementError::BcsError(e.to_string()))
+        let raw_tx = build_raw_tx(
+            self.sender_addr, self.contract_addr, "settlement", "settle_match",
+            build_settle_args(m)?, sequence_number, expiration_secs,
+            self.chain_id, self.max_gas, self.gas_price,
+        );
+        encode_signed_tx(raw_tx, &self.signing_key, true)
     }
 
     /// Build a BCS-encoded tx with zeroed signature for simulation.
@@ -600,36 +578,12 @@ impl SettlementSubmitter {
         sequence_number: u64,
         expiration_secs: u64,
     ) -> Result<Vec<u8>, SettlementError> {
-        let args = build_settle_args(m)?;
-
-        let raw_tx = RawTransaction {
-            sender: self.sender_addr,
-            sequence_number,
-            payload: TransactionPayload::EntryFunction(EntryFunction {
-                module: ModuleId {
-                    address: self.contract_addr,
-                    name: "settlement".to_string(),
-                },
-                function: "settle_match".to_string(),
-                ty_args: vec![],
-                args,
-            }),
-            max_gas_amount: self.max_gas,
-            gas_unit_price: self.gas_price,
-            expiration_timestamp_secs: expiration_secs,
-            chain_id: self.chain_id,
-        };
-
-        let signed_tx = SignedTransaction {
-            raw_txn: raw_tx,
-            authenticator: TransactionAuthenticator::Ed25519(Ed25519Authenticator {
-                public_key: self.signing_key.verifying_key().to_bytes().to_vec(),
-                signature: vec![0u8; 64], // zeroed signature for simulation
-            }),
-        };
-
-        bcs::to_bytes(&signed_tx)
-            .map_err(|e| SettlementError::BcsError(e.to_string()))
+        let raw_tx = build_raw_tx(
+            self.sender_addr, self.contract_addr, "settlement", "settle_match",
+            build_settle_args(m)?, sequence_number, expiration_secs,
+            self.chain_id, self.max_gas, self.gas_price,
+        );
+        encode_signed_tx(raw_tx, &self.signing_key, false)
     }
 
     /// Estimate gas via simulate endpoint (4A).

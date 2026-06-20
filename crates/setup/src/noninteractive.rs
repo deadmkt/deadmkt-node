@@ -36,6 +36,13 @@ pub struct SetupConfig {
     /// Required for fresh setup. Hex-prefixed account address.
     pub beneficiary_address: String,
 
+    /// Burn-exit revision: sponsor address (capital provider; receives
+    /// the time-decayed refund on burn-exit). Optional in config: defaults
+    /// to the trustee address (self-funded operator pattern) if absent.
+    /// Mainnet best practice is three distinct addresses.
+    #[serde(default)]
+    pub sponsor_address: Option<String>,
+
     /// "trading" or "bootstrap". Defaults to "trading".
     #[serde(default = "default_node_role")]
     pub node_role: String,
@@ -151,6 +158,10 @@ pub struct SetupResult {
     pub trustee_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub beneficiary_address: Option<String>,
+    /// Burn-exit rev: sponsor address that was used at mint. Mirrors
+    /// what the contract stored in registry.sponsors[nft_id].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sponsor_address: Option<String>,
     pub network: String,
     pub node_role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,6 +185,7 @@ impl SetupResult {
             nft_id: None,
             trustee_address: None,
             beneficiary_address: None,
+            sponsor_address: None,
             network: network.to_string(),
             node_role: node_role.to_string(),
             escrow_balances: None,
@@ -307,6 +319,9 @@ pub fn validate_withdrawal_rules(rules: &WithdrawalRules) -> Result<(), SetupErr
 pub struct ValidatedSetupConfig {
     pub network: deadmkt_config::Network,
     pub beneficiary_address: String, // normalised (lowercase, trimmed)
+    /// Burn-exit rev: normalised sponsor address, or None if not provided
+    /// in the config. None means "default to trustee address" at mint time.
+    pub sponsor_address: Option<String>,
     pub bootstrap_only: bool,        // node_role == "bootstrap"
     pub mint_amounts: MintAmounts,
     pub withdrawal_rules: WithdrawalRules,
@@ -318,11 +333,16 @@ fn validate_common(cfg: &SetupConfig) -> Result<ValidatedSetupConfig, SetupError
     let network = validate_network(&cfg.network)?;
     let beneficiary_address = validate_address(&cfg.beneficiary_address)?;
     let bootstrap_only = validate_node_role(&cfg.node_role)?;
+    let sponsor_address = match &cfg.sponsor_address {
+        Some(s) if !s.trim().is_empty() => Some(validate_address(s)?),
+        _ => None,
+    };
     validate_mint_amounts(&cfg.mint_amounts)?;
     validate_withdrawal_rules(&cfg.withdrawal_rules)?;
     Ok(ValidatedSetupConfig {
         network,
         beneficiary_address,
+        sponsor_address,
         bootstrap_only,
         mint_amounts: cfg.mint_amounts.clone(),
         withdrawal_rules: cfg.withdrawal_rules.clone(),
@@ -696,6 +716,13 @@ pub async fn run_setup_noninteractive_restore(
     let v = ValidatedSetupConfig {
         network: network.clone(),
         beneficiary_address: beneficiary_address.clone(),
+        // Restore-from-backup path: sponsor address isn't reconstructable
+        // from chain state for the restore use case (we'd need to query
+        // nft::get_sponsor(nft_id), which the restore happy path could do
+        // later). Leaving None here means the existing NFT's mint won't
+        // be repeated; the only thing that uses sponsor in this path is
+        // a hypothetical re-mint, which the restore flow doesn't trigger.
+        sponsor_address: None,
         bootstrap_only: false,
         mint_amounts: MintAmounts::default(),
         withdrawal_rules: WithdrawalRules::default(),
@@ -820,8 +847,12 @@ async fn run_setup_after_keystore(
             nft_id
         }
         Ok(crate::ExistingNft::NotFound) => {
+            // Burn-exit rev: sponsor defaults to trustee address (self-funded
+            // pattern) when not specified in the config. Operators wanting the
+            // three-address pattern set sponsor_address in setup.json.
+            let sponsor = v.sponsor_address.clone().unwrap_or_else(|| address.clone());
             match crate::mint_nft_pair(
-                &mut io, chain, public.as_bytes(), &v.beneficiary_address, &address,
+                &mut io, chain, public.as_bytes(), &v.beneficiary_address, &sponsor, &address,
             ).await {
                 Ok(id) => {
                     result.steps_performed.push("mint_nft".into());
@@ -1124,6 +1155,7 @@ mod tests {
         let cfg = SetupConfig {
             network: "testnet".into(),
             beneficiary_address: "0xABCDef0123".into(),
+            sponsor_address: None,
             node_role: "trading".into(),
             keystore_password: Some("strongpass".into()),
             mint_amounts: MintAmounts::default(),
@@ -1142,6 +1174,7 @@ mod tests {
         let cfg = SetupConfig {
             network: "testnet".into(),
             beneficiary_address: "0xABCDef0123".into(),
+            sponsor_address: None,
             node_role: "trading".into(),
             keystore_password: None, // missing -> MR1a should reject
             mint_amounts: MintAmounts::default(),
@@ -1160,6 +1193,7 @@ mod tests {
         let cfg = SetupConfig {
             network: "testnet".into(),
             beneficiary_address: "0xABCDef0123".into(),
+            sponsor_address: None,
             node_role: "trading".into(),
             keystore_password: None, // LLM safety: no password in config
             mint_amounts: MintAmounts::default(),
@@ -1176,6 +1210,7 @@ mod tests {
         let cfg = SetupConfig {
             network: "testnet".into(),
             beneficiary_address: "0xABCDef0123".into(),
+            sponsor_address: None,
             node_role: "trading".into(),
             keystore_password: Some("oops".into()), // present -> rejected
             mint_amounts: MintAmounts::default(),
@@ -1223,6 +1258,7 @@ mod tests {
         let v = ValidatedSetupConfig {
             network: deadmkt_config::Network::Testnet,
             beneficiary_address: "0xbeef".into(),
+            sponsor_address: None,
             bootstrap_only: false,
             mint_amounts: MintAmounts::default(),
             withdrawal_rules: WithdrawalRules {
@@ -1236,7 +1272,7 @@ mod tests {
         assert_eq!(cfg.trustee_address, "0xfeedface");
         assert_eq!(cfg.beneficiary_address, "0xbeef");
         assert_eq!(cfg.network, deadmkt_config::Network::Testnet);
-        assert_eq!(cfg.contracts.settlement, "0x9b8fd778b08131297d22b577c1f4e2f6ed85d04479cd73e0eb14bbf41fc6731c");
+        assert_eq!(cfg.contracts.settlement, "0x7bbf47b7a9d5a94cd9aaccf5039dcd34647e521615db47a1d5b2141ccf00a55f");
         assert!(cfg.rpc_urls[0].contains("rpc-testnet"));
         assert_eq!(cfg.bootstrap_peers.len(), 5);
         assert_eq!(cfg.withdrawal_rules.holding_period_days, 90);

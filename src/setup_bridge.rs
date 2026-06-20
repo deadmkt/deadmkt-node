@@ -265,6 +265,32 @@ pub struct SupraSetupClient {
 }
 
 impl SupraSetupClient {
+    /// Burn-exit (DMKT13): read-only preview of what exits::execute_burn_pair
+    /// would pay for `nft_id` right now. Returns raw u64 SUPRA (8 decimals).
+    /// Reflects bootstrap lockout, last-NFT carve-out, time-decay, pro-rata cap.
+    pub async fn preview_burn_refund(&self, nft_id: u64) -> Result<u64, SetupError> {
+        match self.client
+            .view_raw(
+                "exits",
+                "preview_burn_refund",
+                vec![],
+                vec![Value::String(nft_id.to_string())],
+            )
+            .await
+        {
+            Ok(val) => {
+                let raw = val.as_array()
+                    .and_then(|arr| arr.first())
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| SetupError::ChainError(
+                        "preview_burn_refund: unexpected view result shape".into(),
+                    ))?;
+                raw.parse::<u64>().map_err(|e| SetupError::ChainError(e.to_string()))
+            }
+            Err(e) => Err(SetupError::ChainError(e.to_string())),
+        }
+    }
+
     pub fn new(rpc_urls: Vec<String>, contract_addr: String) -> Self {
         let parsed = parse_address(&contract_addr).unwrap_or([0u8; 32]);
         // #12: env overrides apply at wizard time too (before config.json exists).
@@ -677,16 +703,15 @@ impl ChainClient for SupraSetupClient {
                 .await
             {
                 Ok(val) => Ok(NftConfigInfo {
-                    bond_amount: val.get(0).map(|v| Self::parse_u64(v)).unwrap_or(100_000_000_000),
-                    bond_lock_seconds: val.get(1).map(|v| Self::parse_u64(v)).unwrap_or(86400),
-                    admin: val.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    // Burn-exit rev: NftConfig is (burn_cooldown_seconds, admin).
+                    burn_cooldown_seconds: val.get(0).map(|v| Self::parse_u64(v)).unwrap_or(3600),
+                    admin: val.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 }),
                 Err(_) => {
-                    // Contract may not be deployed yet — use testnet defaults
-                    // Bond: 1 SUPRA (8 decimals), Lock: 90 days
+                    // Contract may not be deployed yet -- use testnet defaults
+                    // (cooldown: 1 hour per nft.move DEFAULT_BURN_COOLDOWN_SECONDS).
                     Ok(NftConfigInfo {
-                        bond_amount: 100_000_000,
-                        bond_lock_seconds: 7_776_000,
+                        burn_cooldown_seconds: 3600,
                         admin: String::new(),
                     })
                 }
@@ -698,18 +723,49 @@ impl ChainClient for SupraSetupClient {
         &self,
         pubkey: &[u8],
         beneficiary: &str,
+        sponsor: &str,
     ) -> Pin<Box<dyn Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
         let pubkey_vec = pubkey.to_vec();
         let ben = beneficiary.to_string();
+        let sp = sponsor.to_string();
         Box::pin(async move {
             let ben_addr = parse_address(&ben)?;
+            let sp_addr = parse_address(&sp)?;
+            // Burn-exit rev: mint_pair(trustee, ed25519_pubkey, beneficiary, sponsor)
+            // -- sponsor is the 4th positional arg, immutable post-mint, receives
+            // the time-decayed refund on burn-exit.
             let args = vec![
                 bcs::to_bytes(&pubkey_vec)
                     .map_err(|e| SetupError::ChainError(e.to_string()))?,
                 bcs::to_bytes(&ben_addr)
                     .map_err(|e| SetupError::ChainError(e.to_string()))?,
+                bcs::to_bytes(&sp_addr)
+                    .map_err(|e| SetupError::ChainError(e.to_string()))?,
             ];
             self.submit_entry_function("nft", "mint_pair", args).await
+        })
+    }
+
+    fn get_mint_fee(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, SetupError>> + Send + '_>> {
+        Box::pin(async move {
+            match self.client
+                .view_raw("ops_treasury", "get_mint_fee", vec![], vec![])
+                .await
+            {
+                Ok(val) => {
+                    // Expected: ["100000000000"] (or similar single-value array)
+                    let raw = val.as_array()
+                        .and_then(|arr| arr.first())
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| SetupError::ChainError(
+                            "get_mint_fee: unexpected view result shape".into(),
+                        ))?;
+                    raw.parse::<u64>().map_err(|e| SetupError::ChainError(e.to_string()))
+                }
+                Err(e) => Err(SetupError::ChainError(e.to_string())),
+            }
         })
     }
 

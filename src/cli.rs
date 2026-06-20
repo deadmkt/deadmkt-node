@@ -107,6 +107,19 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Burn-exit (DMKT13): permissionless individual NFT burn-exit.
+    ///
+    /// Three actions:
+    ///   - request: beneficiary marks the pair as burn-pending
+    ///     (commits; no cancel path)
+    ///   - preview: read-only view of what execute_burn_pair would pay now
+    ///   - execute: trustee (or anyone if trustee reaped) destroys the
+    ///     pair, sponsor gets the time-decayed refund, beneficiary gets
+    ///     leftover-token-burn-to-SUPRA
+    BurnPair {
+        #[command(subcommand)]
+        action: BurnPairAction,
+    },
 }
 
 /// MR3: withdrawal sub-actions. SUPRA-only by design -- the per-token
@@ -185,6 +198,50 @@ pub enum BurnTarget {
     Escrow,
     /// SUPRA flows to the beneficiary wallet. Profit takeout.
     Beneficiary,
+}
+
+/// Burn-exit (DMKT13) subcommands.
+#[derive(Subcommand, Debug, Clone, PartialEq)]
+pub enum BurnPairAction {
+    /// Beneficiary marks the pair as burn-pending. Commits with no cancel.
+    /// Signed from the beneficiary keystore (NOT trustee). The local node
+    /// only has the trustee keystore; this action is therefore typically
+    /// run from a separate beneficiary wallet, not via the node CLI.
+    /// Included here for symmetry + future multi-keystore support.
+    Request {
+        #[arg(long)] json: bool,
+        #[arg(long)] password_stdin: bool,
+    },
+    /// Trustee (or anyone, if `is_active(nft_id) == false`) executes the
+    /// burn. Sponsor receives the time-decayed refund; beneficiary receives
+    /// leftover-token-burn-to-SUPRA. Both NFTs destroyed.
+    Execute {
+        #[arg(long)] json: bool,
+        #[arg(long)] password_stdin: bool,
+    },
+    /// Read-only view of what `execute` would pay right now.
+    /// Reflects bootstrap lockout (returns 0 if locked) + carve-out
+    /// (returns treasury_balance if N==1) + time-decay + pro-rata cap.
+    Preview {
+        #[arg(long)] json: bool,
+    },
+}
+
+impl BurnPairAction {
+    pub fn json(&self) -> bool {
+        match self {
+            Self::Request { json, .. }
+            | Self::Execute { json, .. }
+            | Self::Preview { json, .. } => *json,
+        }
+    }
+    pub fn password_stdin(&self) -> bool {
+        match self {
+            Self::Request { password_stdin, .. }
+            | Self::Execute { password_stdin, .. } => *password_stdin,
+            Self::Preview { .. } => false,
+        }
+    }
 }
 
 impl Cli {

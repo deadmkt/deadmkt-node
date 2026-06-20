@@ -296,11 +296,11 @@ impl EscrowTracker {
         base_decimals: u8,
         quote_decimals: u8,
     ) -> Result<(), EscrowError> {
-        let price_dec: u32 = 8; // prices are always 8-decimal
-        let exponent = base_decimals as u32 + price_dec - quote_decimals as u32;
+        const PRICE_DECIMALS: u32 = 8; // prices are always 8-decimal
+        let exponent = base_decimals as u32 + PRICE_DECIMALS - quote_decimals as u32;
         let divisor = 10u128.pow(exponent);
         eprintln!("  [escrow] apply_match: base_dec={} quote_dec={} price_dec={} exponent={} divisor={}",
-            base_decimals, quote_decimals, price_dec, exponent, divisor);
+            base_decimals, quote_decimals, PRICE_DECIMALS, exponent, divisor);
 
         match my_side {
             Side::Buy => {

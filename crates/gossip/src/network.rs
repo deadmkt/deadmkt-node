@@ -48,6 +48,11 @@ pub struct GossipNode {
     global_report_topic: IdentTopic,
 }
 
+/// Gossipsub heartbeat cadence (also referenced in this module's tests).
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
+/// Max gossip message size on the wire, in bytes.
+const MAX_TRANSMIT_SIZE: usize = 65536;
+
 impl GossipNode {
     /// Create a new gossip node with the given identity keypair.
     pub fn new(keypair: Keypair) -> Result<Self, GossipError> {
@@ -55,9 +60,9 @@ impl GossipNode {
         let global_report = IdentTopic::new("global:settlement_report");
 
         let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_millis(200))
+            .heartbeat_interval(HEARTBEAT_INTERVAL)
             .validation_mode(ValidationMode::Permissive)
-            .max_transmit_size(65536)
+            .max_transmit_size(MAX_TRANSMIT_SIZE)
             .flood_publish(true)
             .mesh_n_low(1)
             .mesh_n(2)
