@@ -1286,7 +1286,7 @@ mod tests {
         assert_eq!(cfg.trustee_address, "0xfeedface");
         assert_eq!(cfg.payout_address, "0xbeef");
         assert_eq!(cfg.network, deadmkt_config::Network::Testnet);
-        assert_eq!(cfg.contracts.settlement, "0x7bbf47b7a9d5a94cd9aaccf5039dcd34647e521615db47a1d5b2141ccf00a55f");
+        assert_eq!(cfg.contracts.settlement, "0x79b2ad6fea72a9aed2ea4bb7ded31c2741d52d7777b92fbc83dd80a7862094a9");
         assert!(cfg.rpc_urls[0].contains("rpc-testnet"));
         assert_eq!(cfg.bootstrap_peers.len(), 5);
         assert_eq!(cfg.withdrawal_rules.holding_period_days, 90);

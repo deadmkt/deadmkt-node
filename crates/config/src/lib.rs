@@ -145,8 +145,10 @@ fn default_rpc_urls(network: &Network) -> Vec<String> {
 pub fn default_contract_addresses(network: &Network) -> ContractAddresses {
     let addr = match network {
         // Tracks the active testnet deploy; override per-node via DEADMKT_CONTRACT_ADDR.
-        // DMKT13 (the cleanup/cr1 deploy revision); was DMKT12 0x9b8fd778...731c.
-        Network::Testnet => "0x7bbf47b7a9d5a94cd9aaccf5039dcd34647e521615db47a1d5b2141ccf00a55f",
+        // DMKT14 (the dmkt14/remove-beneficiary deploy target). DMKT13 (0x7bbf47b7...a55f)
+        // was published but never cut over; DMKT12 (0x9b8fd778...731c) is the live deploy
+        // until DMKT14 publishes.
+        Network::Testnet => "0x79b2ad6fea72a9aed2ea4bb7ded31c2741d52d7777b92fbc83dd80a7862094a9",
         Network::Mainnet => "", // TBD at mainnet launch
     };
     ContractAddresses {
