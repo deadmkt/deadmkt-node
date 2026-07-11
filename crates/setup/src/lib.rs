@@ -1,5 +1,5 @@
 // deadmkt-setup: First boot wizard.
-// Interactive 10-step setup: network, beneficiary, keygen, funding,
+// Interactive 10-step setup: network, payout, keygen, funding,
 // NFT mint/import, withdrawal config, register+deposit, profit config,
 // auth token, bootstrap peers.
 
@@ -282,7 +282,7 @@ pub struct TxResultInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExistingNft {
-    Found { nft_id: u64, beneficiary: String },
+    Found { nft_id: u64 },
     NotFound,
 }
 
@@ -302,19 +302,15 @@ pub trait ChainClient: Send + Sync {
         address: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, SetupError>> + Send + '_>>;
 
-    fn get_beneficiary(
-        &self,
-        nft_id: u64,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, SetupError>> + Send + '_>>;
-
     fn get_nft_config(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<NftConfigInfo, SetupError>> + Send + '_>>;
 
+    /// DMKT14: nft::mint_trustee_nft(trustee, ed25519_pubkey, sponsor).
+    /// The beneficiary arg is gone (no on-chain beneficiary anymore).
     fn submit_mint(
         &self,
         pubkey: &[u8],
-        beneficiary: &str,
         sponsor: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>;
 
@@ -417,13 +413,15 @@ pub trait ChainClient: Send + Sync {
         Box::pin(async { Err(SetupError::ChainError("submit_burn_from_escrow not implemented".into())) })
     }
 
-    /// Call tokens::burn_to_beneficiary(amount). Burns triples from escrow,
-    /// returns SUPRA to beneficiary. Profit distribution path.
-    fn submit_burn_to_beneficiary(
+    /// Call tokens::burn_for_profit(burn_amount, recipient). Burns triples
+    /// from escrow, returns SUPRA to `recipient` (the off-chain payout
+    /// address). Profit distribution path. DMKT14: was burn_to_beneficiary.
+    fn submit_burn_for_profit(
         &self,
         _amount: u64,
+        _recipient: String,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
-        Box::pin(async { Err(SetupError::ChainError("submit_burn_to_beneficiary not implemented".into())) })
+        Box::pin(async { Err(SetupError::ChainError("submit_burn_for_profit not implemented".into())) })
     }
 
     /// Call tokens::lock_from_escrow(symbol, amount, min_duration_secs).
@@ -487,12 +485,14 @@ pub trait ChainClient: Send + Sync {
         Box::pin(async { Err(SetupError::ChainError("submit_cancel_rushed_withdrawal not implemented".into())) })
     }
 
-    /// Call tokens::rushed_withdrawal_as_supra(nft_id). Burns the max
-    /// equal triple from escrow and returns SUPRA to the beneficiary.
-    /// Requires a prior request_rushed_withdrawal + elapsed grace.
+    /// Call tokens::rushed_withdrawal_as_supra(nft_id, recipient). Burns the
+    /// max equal triple from escrow and returns SUPRA to `recipient` (the
+    /// off-chain payout address). Requires a prior request_rushed_withdrawal
+    /// + elapsed grace. DMKT14: gained the `recipient` arg.
     fn submit_rushed_withdrawal_as_supra(
         &self,
         _nft_id: u64,
+        _recipient: String,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
         Box::pin(async { Err(SetupError::ChainError("submit_rushed_withdrawal_as_supra not implemented".into())) })
     }
@@ -516,14 +516,28 @@ pub trait ChainClient: Send + Sync {
         Box::pin(async { Err(SetupError::ChainError("submit_cancel_holding_period not implemented".into())) })
     }
 
-    /// Call tokens::claim_all_as_supra(nft_id). Burns the max equal
-    /// triple from escrow after holding period expires and returns
-    /// SUPRA to the beneficiary.
+    /// Call tokens::claim_all_as_supra(nft_id, recipient). Burns the max
+    /// equal triple from escrow after holding period expires and returns
+    /// SUPRA to `recipient` (the off-chain payout address). DMKT14: gained
+    /// the `recipient` arg.
     fn submit_claim_all_as_supra(
         &self,
         _nft_id: u64,
+        _recipient: String,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
         Box::pin(async { Err(SetupError::ChainError("submit_claim_all_as_supra not implemented".into())) })
+    }
+
+    /// Call exits::burn_trustee_nft(nft_id, recipient). DMKT14: single
+    /// trustee-signed burn-exit that replaces the old two-step
+    /// request_burn_pair + execute_burn_pair. Refund SUPRA goes to
+    /// `recipient` (the off-chain payout address).
+    fn submit_burn_trustee_nft(
+        &self,
+        _nft_id: u64,
+        _recipient: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>> {
+        Box::pin(async { Err(SetupError::ChainError("submit_burn_trustee_nft not implemented".into())) })
     }
 }
 
@@ -572,15 +586,18 @@ pub fn prompt_sponsor(io: &mut dyn WizardIO, trustee_address: &str) -> Result<St
     .map(|s| s.trim().to_string())
 }
 
-/// Step 2: beneficiary address (required). MR7: uses dialoguer-backed
-/// validated input on real terminals; legacy print+read_line elsewhere.
-pub fn prompt_beneficiary(io: &mut dyn WizardIO) -> Result<String, SetupError> {
-    io.print_info("Supra blockchain beneficiary address (receives profits, can withdraw from escrow).");
+/// Step 2: payout address (required). DMKT14: this is the off-chain
+/// address where exit/profit/withdrawal SUPRA is sent (passed as the
+/// `recipient` arg on every exit/withdraw/profit call). It replaces the
+/// removed on-chain beneficiary NFT. MR7: uses dialoguer-backed validated
+/// input on real terminals; legacy print+read_line elsewhere.
+pub fn prompt_payout(io: &mut dyn WizardIO) -> Result<String, SetupError> {
+    io.print_info("Supra blockchain payout address (receives profits + exit/withdrawal SUPRA).");
     io.print_info("Can be your own address if self-funded.");
     let validator: &dyn Fn(&str) -> Result<(), String> = &|input: &str| {
         let trimmed = input.trim();
         if trimmed.is_empty() {
-            Err("Beneficiary address is required.".to_string())
+            Err("Payout address is required.".to_string())
         } else if !trimmed.starts_with("0x") || trimmed.len() < 10 {
             Err("Invalid address. Must start with 0x and be at least 10 chars.".to_string())
         } else {
@@ -588,7 +605,7 @@ pub fn prompt_beneficiary(io: &mut dyn WizardIO) -> Result<String, SetupError> {
         }
     };
     io.prompt_input(
-        "Beneficiary address (0x...)",
+        "Payout address (0x...)",
         None,
         Some(validator),
     )
@@ -729,8 +746,7 @@ pub async fn check_existing_nft(
         return Ok(ExistingNft::NotFound);
     }
     let nft_id = chain.get_nft_id(address).await?;
-    let beneficiary = chain.get_beneficiary(nft_id).await?;
-    Ok(ExistingNft::Found { nft_id, beneficiary })
+    Ok(ExistingNft::Found { nft_id })
 }
 
 /// Step 5b: mint NFT pair
@@ -744,7 +760,6 @@ pub async fn mint_nft_pair(
     io: &mut dyn WizardIO,
     chain: &dyn ChainClient,
     pubkey: &[u8],
-    beneficiary: &str,
     sponsor: &str,
     trustee_address: &str,
 ) -> Result<u64, SetupError> {
@@ -764,8 +779,8 @@ pub async fn mint_nft_pair(
     if sponsor == trustee_address {
         io.print_warning(
             "Sponsor address matches trustee. This is acceptable on testnet but on\n\
-             mainnet you should use three distinct addresses (sponsor / trustee /\n\
-             beneficiary) for cold/hot-key separation.",
+             mainnet you should use distinct addresses (sponsor / trustee) for\n\
+             cold/hot-key separation.",
         );
     }
     let accepted = io.prompt_confirm(
@@ -777,8 +792,8 @@ pub async fn mint_nft_pair(
     }
 
     // MR7: spinner during the multi-second mint submission + tx wait.
-    let spin = io.spinner("Submitting NFT mint_pair...");
-    let result = chain.submit_mint(pubkey, beneficiary, sponsor).await?;
+    let spin = io.spinner("Submitting NFT mint_trustee_nft...");
+    let result = chain.submit_mint(pubkey, sponsor).await?;
     spin.finish_with_message(if result.success { "NFT minted" } else { "NFT mint FAILED" });
     if !result.success {
         return Err(SetupError::ChainError(result.vm_status));
@@ -1249,7 +1264,7 @@ pub async fn run_wizard(
     let network = prompt_network(io)?;
 
     // Step 2
-    let beneficiary = prompt_beneficiary(io)?;
+    let payout = prompt_payout(io)?;
 
     // Step 2b
     let bootstrap_only = prompt_node_role(io)?;
@@ -1281,7 +1296,7 @@ pub async fn run_wizard(
         ExistingNft::NotFound => {
             // Burn-exit rev: ask for sponsor address right before mint.
             let sponsor = prompt_sponsor(io, &address)?;
-            mint_nft_pair(io, chain, public.as_bytes(), &beneficiary, &sponsor, &address).await?
+            mint_nft_pair(io, chain, public.as_bytes(), &sponsor, &address).await?
         }
     };
 
@@ -1309,7 +1324,7 @@ pub async fn run_wizard(
     };
 
     // Step 7: Profit config removed in DMKT11.
-    // Agent handles profit distribution via burn_to_beneficiary.
+    // Agent handles profit distribution via burn_for_profit.
     let profit = ProfitConfig {
         base_capital: HashMap::new(),
         threshold_pct: 0,
@@ -1335,7 +1350,7 @@ pub async fn run_wizard(
         rpc_urls: vec!["https://rpc-testnet.supra.com".into()],
         nft_id,
         trustee_address: address,
-        beneficiary_address: beneficiary,
+        payout_address: payout,
         sponsor_address: String::new(),
         contracts,
         bootstrap_peers,
@@ -1444,7 +1459,6 @@ mod tests {
         balance_responses: std::sync::Mutex<VecDeque<WalletBalance>>,
         is_trustee_val: bool,
         nft_id_val: u64,
-        beneficiary_val: String,
         nft_config: NftConfigInfo,
         mint_result: TxResultInfo,
         total_minted: u64,
@@ -1457,7 +1471,6 @@ mod tests {
                 balance_responses: std::sync::Mutex::new(VecDeque::new()),
                 is_trustee_val: false,
                 nft_id_val: 42,
-                beneficiary_val: String::new(),
                 nft_config: NftConfigInfo {
                     burn_cooldown_seconds: 3600,
                     admin: "0xADMIN".into(),
@@ -1503,13 +1516,6 @@ mod tests {
             Box::pin(async move { Ok(val) })
         }
 
-        fn get_beneficiary(&self, _nft_id: u64)
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, SetupError>> + Send + '_>>
-        {
-            let val = self.beneficiary_val.clone();
-            Box::pin(async move { Ok(val) })
-        }
-
         fn get_nft_config(&self)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<NftConfigInfo, SetupError>> + Send + '_>>
         {
@@ -1517,7 +1523,7 @@ mod tests {
             Box::pin(async move { Ok(val) })
         }
 
-        fn submit_mint(&self, _pubkey: &[u8], _beneficiary: &str, _sponsor: &str)
+        fn submit_mint(&self, _pubkey: &[u8], _sponsor: &str)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TxResultInfo, SetupError>> + Send + '_>>
         {
             let val = self.mint_result.clone();
@@ -1614,22 +1620,22 @@ mod tests {
 
     // T_SETUP_02
     #[test]
-    fn test_beneficiary_address_explicit() {
+    fn test_payout_address_explicit() {
         let mut io = MockIO::new();
-        io.queue_input("0xC1234BENEFICIARY");
-        let beneficiary = prompt_beneficiary(&mut io).unwrap();
-        assert_eq!(beneficiary, "0xC1234BENEFICIARY");
-        assert!(io.output_contains("beneficiary"));
+        io.queue_input("0xC1234PAYOUT");
+        let payout = prompt_payout(&mut io).unwrap();
+        assert_eq!(payout, "0xC1234PAYOUT");
+        assert!(io.output_contains("payout"));
     }
 
     // T_SETUP_02b
     #[test]
-    fn test_beneficiary_address_required() {
+    fn test_payout_address_required() {
         let mut io = MockIO::new();
         io.queue_input("");                       // empty - rejected
         io.queue_input("0xVALIDADDRESS1234");    // valid
-        let beneficiary = prompt_beneficiary(&mut io).unwrap();
-        assert_eq!(beneficiary, "0xVALIDADDRESS1234");
+        let payout = prompt_payout(&mut io).unwrap();
+        assert_eq!(payout, "0xVALIDADDRESS1234");
         assert!(io.output_contains("required"));
     }
 
@@ -1705,14 +1711,12 @@ mod tests {
         let mut mock = MockChainClient::default_success();
         mock.is_trustee_val = true;
         mock.nft_id_val = 42;
-        mock.beneficiary_val = "0xEXISTING_BENEF".into();
 
         let result = check_existing_nft(&mock, "0xTRUSTEE").await.unwrap();
         assert_eq!(
             result,
             ExistingNft::Found {
                 nft_id: 42,
-                beneficiary: "0xEXISTING_BENEF".into()
             }
         );
     }
@@ -1733,10 +1737,11 @@ mod tests {
         let mock = MockChainClient::default_success();
         let pubkey = [1u8; 32];
 
-        // Burn-exit rev: 6-arg mint_nft_pair (added sponsor). Self-sponsored
-        // pattern: sponsor == trustee_address.
+        // DMKT14: mint_nft_pair drops beneficiary; args are
+        // (pubkey, sponsor, trustee_address). Self-sponsored pattern:
+        // sponsor == trustee_address.
         let result = mint_nft_pair(
-            &mut io, &mock, &pubkey, "0xBENEFICIARY", "0xTRUSTEE", "0xTRUSTEE",
+            &mut io, &mock, &pubkey, "0xTRUSTEE", "0xTRUSTEE",
         ).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 42);
@@ -1754,7 +1759,7 @@ mod tests {
         let mock = MockChainClient::default_success();
 
         let result = mint_nft_pair(
-            &mut io, &mock, &[1u8; 32], "0xBENEF", "0xTRUSTEE", "0xTRUSTEE",
+            &mut io, &mock, &[1u8; 32], "0xTRUSTEE", "0xTRUSTEE",
         ).await;
         assert!(matches!(result, Err(SetupError::UserDeclined)));
     }
@@ -1895,7 +1900,7 @@ mod tests {
 
         let mut io = MockIO::new();
         io.queue_input("");                       // press enter to begin
-        io.queue_input("0xBENEFICIARY1234");      // beneficiary
+        io.queue_input("0xPAYOUT1234");           // payout address
         io.queue_input("1");                      // node role: trading
         io.queue_input("test-pass");              // password
         io.queue_input("test-pass");              // confirm
@@ -1934,7 +1939,7 @@ mod tests {
         assert_eq!(config.network, Network::Testnet);
         assert_eq!(config.nft_id, 42);
         assert!(!config.trustee_address.is_empty());
-        assert_eq!(config.beneficiary_address, "0xBENEFICIARY1234");
+        assert_eq!(config.payout_address, "0xPAYOUT1234");
         assert_eq!(config.withdrawal_rules.holding_period_days, 90);
         assert!(config.withdrawal_rules.rushed_withdrawal_enabled);
     }
@@ -1946,7 +1951,7 @@ mod tests {
 
         let mut io = MockIO::new();
         io.queue_input("");                       // press enter to begin
-        io.queue_input("0xBENEFICIARY1234");      // beneficiary
+        io.queue_input("0xPAYOUT1234");           // payout address
         io.queue_input("2");                      // node role: bootstrap/relay
         io.queue_input("test-pass");              // password
         io.queue_input("test-pass");              // confirm
@@ -2007,7 +2012,7 @@ mod tests {
         let mut io = MockIO::new();
         io.queue_input("");   // press enter to begin
         io.queue_input("1"); // network
-        io.queue_abort();     // abort during beneficiary
+        io.queue_abort();     // abort during payout
 
         let mock = MockChainClient::default_success();
         let result = run_wizard(&mut io, &mock, dir.path()).await;

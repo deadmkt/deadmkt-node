@@ -48,7 +48,7 @@ indicatif = { version = "0.17", default-features = false }
 
 [package]
 name = "deadmkt-node"
-version = "0.1.11"
+version = "0.14.0"
 edition = "2021"
 
 [[bin]]

@@ -133,8 +133,8 @@ async fn test_interop_phase_a_key_format() {
     println!(
         "  supra move tool run \\",
     );
-    println!("    --function-id {}::nft::mint_pair \\", addr);
-    println!("    --args 'hex:{}' 'address:{}' \\", pubkey_hex, addr);
+    println!("    --function-id {}::nft::mint_trustee_nft \\", addr);
+    println!("    --args 'hex:{}' 'address:{}' \\", pubkey_hex, addr);  // ed25519_pubkey, sponsor
     println!("    --rpc-url {}", rpc_url());
     println!();
     println!(

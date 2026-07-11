@@ -75,9 +75,8 @@ pub enum Command {
         #[arg(long, default_value_t = 10)]
         rushed_grace_batches: u64,
     },
-    /// MR3: SUPRA-only withdrawal flows. Beneficiary signer required;
-    /// on a self-funded node trustee == beneficiary so the node keystore
-    /// works. Otherwise the contract returns E_NOT_BENEFICIARY.
+    /// MR3: SUPRA-only withdrawal flows. DMKT14: trustee-signed (the node's
+    /// key IS the trustee); the off-chain payout address receives the SUPRA.
     Withdraw {
         #[command(subcommand)]
         action: WithdrawAction,
@@ -85,7 +84,7 @@ pub enum Command {
     /// MR3: burn equal triples from escrow back to SUPRA.
     Burn {
         /// Burn target: SUPRA returns to escrow (top up gas) or to the
-        /// beneficiary wallet (profit takeout).
+        /// payout address (profit takeout).
         #[arg(long, value_enum)]
         to: BurnTarget,
         /// Amount of each token (EMM/KAY/TEE) to burn, in raw units
@@ -107,15 +106,16 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Burn-exit (DMKT13): permissionless individual NFT burn-exit.
+    /// Burn-exit (DMKT14): individual NFT burn-exit, single trustee-signed
+    /// call.
     ///
-    /// Three actions:
-    ///   - request: beneficiary marks the pair as burn-pending
-    ///     (commits; no cancel path)
-    ///   - preview: read-only view of what execute_burn_pair would pay now
-    ///   - execute: trustee (or anyone if trustee reaped) destroys the
-    ///     pair, sponsor gets the time-decayed refund, beneficiary gets
+    /// Actions:
+    ///   - execute: trustee destroys the NFT via exits::burn_trustee_nft;
+    ///     sponsor gets the time-decayed refund, the payout address gets
     ///     leftover-token-burn-to-SUPRA
+    ///   - preview: read-only view of what execute would pay now
+    ///   - request: removed in DMKT14 (no separate request step); kept for
+    ///     a clear error pointing operators at `execute`
     BurnPair {
         #[command(subcommand)]
         action: BurnPairAction,
@@ -196,25 +196,24 @@ pub enum BurnTarget {
     /// SUPRA returns to the trustee's escrow. Use to top up gas without
     /// withdrawing.
     Escrow,
-    /// SUPRA flows to the beneficiary wallet. Profit takeout.
-    Beneficiary,
+    /// SUPRA flows to the off-chain payout address. Profit takeout.
+    /// DMKT14: was `beneficiary`; calls tokens::burn_for_profit.
+    Payout,
 }
 
 /// Burn-exit (DMKT13) subcommands.
 #[derive(Subcommand, Debug, Clone, PartialEq)]
 pub enum BurnPairAction {
-    /// Beneficiary marks the pair as burn-pending. Commits with no cancel.
-    /// Signed from the beneficiary keystore (NOT trustee). The local node
-    /// only has the trustee keystore; this action is therefore typically
-    /// run from a separate beneficiary wallet, not via the node CLI.
-    /// Included here for symmetry + future multi-keystore support.
+    /// DMKT14: removed. The burn-exit no longer has a separate request
+    /// step; emits a clear error pointing operators at `execute`. Kept as a
+    /// CLI variant for backwards-compatible invocation.
     Request {
         #[arg(long)] json: bool,
         #[arg(long)] password_stdin: bool,
     },
-    /// Trustee (or anyone, if `is_active(nft_id) == false`) executes the
-    /// burn. Sponsor receives the time-decayed refund; beneficiary receives
-    /// leftover-token-burn-to-SUPRA. Both NFTs destroyed.
+    /// Trustee-signed exits::burn_trustee_nft(nft_id, recipient). Sponsor
+    /// receives the time-decayed refund; the payout address receives
+    /// leftover-token-burn-to-SUPRA. NFT destroyed.
     Execute {
         #[arg(long)] json: bool,
         #[arg(long)] password_stdin: bool,
@@ -324,16 +323,16 @@ mod tests {
     }
 
     #[test]
-    fn t_mr3_cli_02_burn_to_beneficiary_with_password_stdin() {
+    fn t_mr3_cli_02_burn_to_payout_with_password_stdin() {
         let cmd = parse(&[
             "deadmkt-node", "burn",
-            "--to", "beneficiary",
+            "--to", "payout",
             "--amount", "5000",
             "--password-stdin",
         ]);
         match cmd {
             Command::Burn { to, amount, json, password_stdin } => {
-                assert_eq!(to, BurnTarget::Beneficiary);
+                assert_eq!(to, BurnTarget::Payout);
                 assert_eq!(amount, 5000);
                 assert!(!json);
                 assert!(password_stdin);

@@ -734,16 +734,17 @@ async fn main() {
 }
 
 // =========================================================================
-// Burn-exit (DMKT13): burn-pair {request, execute, preview}
+// Burn-exit (DMKT14): burn-pair {request, execute, preview}
 //
-// `request` signs from the BENEFICIARY keystore (which the node typically
-// doesn't have on disk -- emits a clear error pointing operators at the
-// beneficiary wallet to submit `exits::request_burn_pair` directly).
-// `execute` signs from the trustee keystore -- this is the normal node path.
-// `preview` is read-only via the exits::preview_burn_refund view.
+// DMKT14 collapsed the old two-step request/execute into a single
+// trustee-signed call exits::burn_trustee_nft(nft_id, recipient). The node
+// always signs as the trustee; the refund SUPRA goes to the off-chain
+// payout address (config.payout_address).
+//   - `execute` -> exits::burn_trustee_nft (the live path).
+//   - `request` -> no longer exists on-chain; emits a pointer to `execute`.
+//   - `preview` -> read-only via exits::preview_burn_refund.
 // =========================================================================
 async fn run_burn_pair_and_exit(action: BurnPairAction, json: bool, password_stdin: bool) -> ! {
-    let _ = password_stdin;  // execute path will use this once wired
     let dir = data_dir();
     let config_path = dir.join("config.json");
 
@@ -799,46 +800,42 @@ async fn run_burn_pair_and_exit(action: BurnPairAction, json: bool, password_std
             }
         }
         BurnPairAction::Request { .. } => {
-            // request_burn_pair is signed by the BENEFICIARY, not the trustee.
-            // The node only holds the trustee keystore.
+            // DMKT14: there is no longer a separate request step. Burn-exit
+            // is a single trustee-signed call (`burn-pair execute`).
             let out = ActionResultBuilder::new("burn-pair-request", serde_json::json!({
                 "nft_id": config.nft_id,
             })).failure(
-                "not_supported_via_node_cli",
-                "request_burn_pair must be signed by the beneficiary wallet, not \
-                 the trustee. Submit exits::request_burn_pair(nft_id) directly \
-                 from your beneficiary wallet (Supra CLI / StarKey / etc).",
+                "no_longer_supported",
+                "DMKT14 removed the burn-exit request step. Burn-exit is now a \
+                 single trustee-signed call -- use `deadmkt-node burn-pair execute`.",
             );
             if json { println!("{}", out); }
             else {
                 eprintln!(
-                    "burn-pair request: signed by beneficiary, not trustee. \
-                     Submit exits::request_burn_pair from your beneficiary wallet."
+                    "burn-pair request: removed in DMKT14. Use \
+                     `deadmkt-node burn-pair execute` (single trustee-signed call)."
                 );
             }
             std::process::exit(2);
         }
         BurnPairAction::Execute { .. } => {
-            // Trustee path: signs exits::execute_burn_pair(caller, nft_id).
-            // Requires ChainClient::submit_execute_burn_pair which isn't yet
-            // wired -- pending the same follow-up as submit_burn_pair on
-            // the chain client trait.
-            let out = ActionResultBuilder::new("burn-pair-execute", serde_json::json!({
+            // DMKT14: trustee-signed exits::burn_trustee_nft(nft_id, recipient).
+            // Refund SUPRA goes to the off-chain payout address.
+            let builder = ActionResultBuilder::new("burn-pair-execute", serde_json::json!({
                 "nft_id": config.nft_id,
-            })).failure(
-                "execute_path_pending",
-                "burn-pair execute requires ChainClient::submit_execute_burn_pair (pending wire-up)",
-            );
-            if json { println!("{}", out); }
-            else {
-                eprintln!(
-                    "burn-pair execute: chain client wire-up pending. \
-                     Use the Supra CLI directly for now: \
-                     `supra move tool run --function-id $CONTRACT::exits::execute_burn_pair --args u64:{}`",
-                    config.nft_id,
-                );
-            }
-            std::process::exit(1);
+                "recipient": config.payout_address.clone(),
+            }));
+            let (config, chain) = match mr3_load_signed_chain(password_stdin).await {
+                Ok(v) => v,
+                Err((step, e)) => {
+                    emit_action_failure(&builder, &step, &e, json);
+                    std::process::exit(1);
+                }
+            };
+            let tx_result = chain
+                .submit_burn_trustee_nft(config.nft_id, config.payout_address.clone())
+                .await;
+            emit_action_tx_result(&builder, tx_result, json);
         }
     }
 }
@@ -881,7 +878,7 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
             };
             let r = SetupResult {
                 success: false, mode: mode_for_failure,
-                nft_id: None, trustee_address: None, beneficiary_address: None, sponsor_address: None,
+                nft_id: None, trustee_address: None, payout_address: None, sponsor_address: None,
                 network: String::new(), node_role: String::new(),
                 escrow_balances: None, gas_balance_supra: None,
                 steps_performed: Vec::new(), steps_skipped: Vec::new(),
@@ -906,7 +903,7 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
             };
             let r = SetupResult {
                 success: false, mode: mode_for_failure,
-                nft_id: None, trustee_address: None, beneficiary_address: None, sponsor_address: None,
+                nft_id: None, trustee_address: None, payout_address: None, sponsor_address: None,
                 network: String::new(), node_role: String::new(),
                 escrow_balances: None, gas_balance_supra: None,
                 steps_performed: Vec::new(), steps_skipped: Vec::new(),
@@ -942,7 +939,7 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
         if cfg.keystore_password.is_some() {
             let r = SetupResult {
                 success: false, mode: SetupMode::ConfigWithKeystore,
-                nft_id: None, trustee_address: None, beneficiary_address: None, sponsor_address: None,
+                nft_id: None, trustee_address: None, payout_address: None, sponsor_address: None,
                 network: String::new(), node_role: String::new(),
                 escrow_balances: None, gas_balance_supra: None,
                 steps_performed: Vec::new(), steps_skipped: Vec::new(),
@@ -958,7 +955,7 @@ async fn run_noninteractive_setup_and_exit(config_path: &std::path::Path) -> ! {
             Err(e) => {
                 let mut r = SetupResult {
                     success: false, mode: SetupMode::ConfigWithKeystore,
-                    nft_id: None, trustee_address: None, beneficiary_address: None, sponsor_address: None,
+                    nft_id: None, trustee_address: None, payout_address: None, sponsor_address: None,
                     network: String::new(), node_role: String::new(),
                     escrow_balances: None, gas_balance_supra: None,
                     steps_performed: Vec::new(), steps_skipped: Vec::new(),
@@ -1030,7 +1027,7 @@ async fn run_status_json_and_exit(config_path: &std::path::Path) -> ! {
                     },
                     cfg.nft_id,
                     &cfg.trustee_address,
-                    &cfg.beneficiary_address,
+                    &cfg.payout_address,
                     &format!("could not connect to running node on 127.0.0.1:9292: {}", connect_err),
                 ),
                 Err(_) => crate::run::build_status_v1_disk_only_json(
@@ -1132,7 +1129,7 @@ async fn run_restore_setup_and_exit(data_dir: &std::path::Path) -> ! {
         Err(e) => {
             let mut r = SetupResult {
                 success: false, mode: SetupMode::Restore,
-                nft_id: None, trustee_address: None, beneficiary_address: None, sponsor_address: None,
+                nft_id: None, trustee_address: None, payout_address: None, sponsor_address: None,
                 network: String::new(), node_role: String::new(),
                 escrow_balances: None, gas_balance_supra: None,
                 steps_performed: Vec::new(), steps_skipped: Vec::new(),
@@ -1350,10 +1347,10 @@ async fn run_mr3_withdraw_and_exit(
     let builder = ActionResultBuilder::new(command_name, serde_json::Value::Object(fields));
 
     let tx_result = match action {
-        WithdrawAction::Rushed { .. } => chain.submit_rushed_withdrawal_as_supra(config.nft_id).await,
+        WithdrawAction::Rushed { .. } => chain.submit_rushed_withdrawal_as_supra(config.nft_id, config.payout_address.clone()).await,
         WithdrawAction::RequestRushed { .. } => chain.submit_request_rushed_withdrawal(config.nft_id).await,
         WithdrawAction::CancelRushed { .. } => chain.submit_cancel_rushed_withdrawal(config.nft_id).await,
-        WithdrawAction::ClaimAll { .. } => chain.submit_claim_all_as_supra(config.nft_id).await,
+        WithdrawAction::ClaimAll { .. } => chain.submit_claim_all_as_supra(config.nft_id, config.payout_address.clone()).await,
         WithdrawAction::StartHolding { .. } => chain.submit_start_holding_period(config.nft_id).await,
         WithdrawAction::CancelHolding { .. } => chain.submit_cancel_holding_period(config.nft_id).await,
     };
@@ -1369,12 +1366,12 @@ async fn run_mr3_burn_and_exit(
 ) -> ! {
     let (target_label, command_name) = match to {
         BurnTarget::Escrow => ("escrow", "burn-to-escrow"),
-        BurnTarget::Beneficiary => ("beneficiary", "burn-to-beneficiary"),
+        BurnTarget::Payout => ("payout", "burn-for-profit"),
     };
     let fields = serde_json::json!({ "to": target_label, "amount": amount });
     let builder = ActionResultBuilder::new(command_name, fields);
 
-    let (_config, chain) = match mr3_load_signed_chain(password_stdin).await {
+    let (config, chain) = match mr3_load_signed_chain(password_stdin).await {
         Ok(v) => v,
         Err((step, e)) => {
             emit_action_failure(&builder, &step, &e, json);
@@ -1384,7 +1381,7 @@ async fn run_mr3_burn_and_exit(
 
     let tx_result = match to {
         BurnTarget::Escrow => chain.submit_burn_from_escrow(amount).await,
-        BurnTarget::Beneficiary => chain.submit_burn_to_beneficiary(amount).await,
+        BurnTarget::Payout => chain.submit_burn_for_profit(amount, config.payout_address.clone()).await,
     };
     emit_action_tx_result(&builder, tx_result, json);
 }
@@ -1594,7 +1591,7 @@ mod mr3_envelope_tests {
     #[test]
     fn t_mr3_env_05_failure_with_empty_fields_object() {
         let builder = ActionResultBuilder::new(
-            "burn-to-beneficiary",
+            "burn-for-profit",
             serde_json::json!({}),
         );
         let v = parse(&builder.failure("load_config", "config.json not found"));

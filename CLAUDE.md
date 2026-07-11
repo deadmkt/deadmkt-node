@@ -55,11 +55,11 @@ cargo test
 
 ## Contract
 
-Address (DMKT13, deploy target): `0x7bbf47b7a9d5a94cd9aaccf5039dcd34647e521615db47a1d5b2141ccf00a55f`
+Address (DMKT14, deploy target): `0x79b2ad6fea72a9aed2ea4bb7ded31c2741d52d7777b92fbc83dd80a7862094a9`
 Chain: Supra Testnet (chain_id: 6)
 7 modules: nft, escrow, settlement, pool_config, tokens, exits, ops_treasury
 
-> Note: DMKT13 is the reserved deploy target this build defaults to (the `cleanup/cr1` revision); not yet published on-chain. DMKT12 (`0x9b8fd778...731c`) remains the live deploy until the coordinated DMKT13 redeploy. Per-node override: `DEADMKT_CONTRACT_ADDR`.
+> Note: DMKT14 (the `dmkt14/remove-beneficiary` revision -- beneficiary NFT removed, off-chain `payout_address`, single-call burn) is the reserved deploy target this build defaults to; **not yet published on-chain**. DMKT12 (`0x9b8fd778...731c`) remains the live deploy until DMKT14 publishes -- so against live testnet, override with `DEADMKT_CONTRACT_ADDR=0x9b8fd778...731c`. The DMKT13 target (`0x7bbf47b7...a55f`) was published but never cut over; that cutover is abandoned. Deploy checklist: `planning/current/DMKT14_POST_DEPLOY.md`.
 
 ## Reference Docs
 
